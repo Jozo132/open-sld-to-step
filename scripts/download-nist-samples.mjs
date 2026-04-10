@@ -44,13 +44,13 @@ const NIST_DIR = join(DOWNLOADS, 'nist');
 //   NIST_ZIP_URL=<new-url>
 // before running this script.
 const NIST_ZIP_URL = process.env.NIST_ZIP_URL ||
-    'https://s3.amazonaws.com/nist-el/mfg_digitalthread/NIST_CTC_FTC_PMI_Models-SolidWorks_MBD_2018.zip';
+    'https://www.nist.gov/system/files/documents/noindex/2024/05/07/NIST-FTC-CTC-PMI-CAD-models.zip';
 
 // Fallback URL if the primary is unavailable
 const NIST_ZIP_URL_FALLBACK =
-    'https://www.nist.gov/document/nist-ctc-ftc-pmi-models-solidworks-mbd-2018';
+    'https://s3.amazonaws.com/nist-el/mfg_digitalthread/NIST_CTC_FTC_PMI_Models-SolidWorks_MBD_2018.zip';
 
-const ZIP_FILENAME = 'NIST_CTC_FTC_PMI_Models-SolidWorks_MBD_2018.zip';
+const ZIP_FILENAME = 'NIST-FTC-CTC-PMI-CAD-models.zip';
 const ZIP_PATH = join(DOWNLOADS, ZIP_FILENAME);
 
 // ── Helpers ───────────────────────────────────────────────────────────────

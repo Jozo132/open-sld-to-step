@@ -145,10 +145,10 @@ describeWithSamples('NIST SLDPRT samples — Parasolid header sanity', () => {
             const result = SldprtContainerParser.extractParasolid(buf);
             if (!result) return;
 
-            const head = result.data.subarray(0, 32).toString('ascii');
+            const head = result.data.subarray(0, 32);
             // Should contain recognisable ASCII or be a valid binary block.
             // We check that the first 32 bytes are not all null.
-            const nonNull = [...result.data.subarray(0, 32)].some(b => b !== 0);
+            const nonNull = [...head].some(b => b !== 0);
             expect(nonNull).toBe(true);
         },
     );

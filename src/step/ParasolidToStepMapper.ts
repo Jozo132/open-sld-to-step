@@ -337,7 +337,7 @@ export class ParasolidToStepMapper {
      * @param fileName  Optional file name embedded in the STEP header.
      */
     static toStepFile(entities: StepEntity[], fileName = 'output.stp'): string {
-        const now = new Date().toISOString().replace(/\..+/, '');
+        const now = new Date().toISOString().slice(0, 19);
         const header = [
             'ISO-10303-21;',
             'HEADER;',

@@ -39,7 +39,7 @@ All other trademarks and trade names mentioned in this repository are the
 property of their respective owners and are used here solely for
 identification purposes.
 
-## Licence
+## License
 
 This project is released under the **Apache License 2.0** — see `LICENSE`
 for the full text.
