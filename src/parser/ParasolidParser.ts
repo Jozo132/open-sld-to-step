@@ -27,7 +27,7 @@
  *  5. Entity instance records:
  *       Prefixed by 0x3D 0x70 ("=p") or 0x3D 0x71 ("=q") markers.
  *       Each record encodes field values for one entity instance.
- *       Geometry data (coordinates) is stored as IEEE 754 float64 (LE).
+ *       Geometry data (coordinates) is stored as IEEE 754 float64 (BE / network order).
  *
  * This parser extracts:
  *  - Header metadata (modeller version, schema ID)
@@ -172,55 +172,133 @@ export class ParasolidParser {
      * Extract coordinate triplets (x, y, z) from entity records.
      *
      * Scans `=p` and `=q` records for sequences of three consecutive
-     * IEEE 754 float64 values that look like 3D coordinates (finite,
-     * within a reasonable range for engineering geometry).
+     * IEEE 754 float64 **Big Endian** values that look like 3D coordinates
+     * (finite, within a reasonable range for engineering geometry).
+     *
+     * The Parasolid binary transmit format stores float64 in network (BE)
+     * byte order — confirmed by the presence of recognisable geometric
+     * constants (√2/2, 1.0, etc.) only when decoded as BE.
+     *
+     * If no `=p`/`=q` markers are found (some Parasolid editions omit them),
+     * falls back to scanning the entire data area for BE float64 triplets
+     * with stricter filtering.
      *
      * @param maxPoints  Maximum number of unique points to extract (default 500).
      *                   Prevents excessive memory use on large files.
      */
     extractCoordinates(maxPoints = 200): PsPoint[] {
         const buf = this.buf;
+
+        // Build a list of all =p/=q marker offsets so we know record boundaries
+        const markers: number[] = [];
+        for (let i = 0; i < buf.length - 1; i++) {
+            if (buf[i] === RECORD_PREFIX &&
+                (buf[i + 1] === RECORD_MARKER_P || buf[i + 1] === RECORD_MARKER_Q)) {
+                markers.push(i);
+            }
+        }
+
+        if (markers.length > 0) {
+            return this.extractFromMarkers(buf, markers, maxPoints);
+        }
+
+        // Fallback: no =p/=q markers — scan full data area
+        return this.extractFromFullScan(buf, maxPoints);
+    }
+
+    /** Extract coordinate triplets from =p/=q record markers. @internal */
+    private extractFromMarkers(buf: Buffer, markers: number[], maxPoints: number): PsPoint[] {
         const points: PsPoint[] = [];
         const seen = new Set<string>();
 
-        for (let i = 0; i < buf.length - 1; i++) {
-            if (buf[i] !== RECORD_PREFIX) continue;
-            if (buf[i + 1] !== RECORD_MARKER_P && buf[i + 1] !== RECORD_MARKER_Q) continue;
+        for (let mi = 0; mi < markers.length; mi++) {
+            const markerOff = markers[mi];
+            const isP = buf[markerOff + 1] === RECORD_MARKER_P;
 
-            // Scan the record for float64 triplets
-            // Records vary in size; scan up to the next record marker or 512 bytes
-            const recordStart = i + 2;
-            const recordEnd = Math.min(buf.length, recordStart + 512);
+            // Record extends from marker to the next marker (or +20000, whichever first)
+            const recordEnd = mi + 1 < markers.length
+                ? markers[mi + 1]
+                : Math.min(markerOff + 20000, buf.length);
 
-            // Look for sequences of 3 valid float64 values (24 bytes)
-            for (let j = recordStart; j + 24 <= recordEnd; j++) {
-                try {
-                    const x = buf.readDoubleLE(j);
-                    const y = buf.readDoubleLE(j + 8);
-                    const z = buf.readDoubleLE(j + 16);
+            // =p records: 2 bytes marker + 3 bytes tag = data at +5
+            // =q records: 2 bytes marker = data at +2
+            const dataStart = markerOff + (isP ? 5 : 2);
 
-                    // Filter: must be finite and within engineering range
-                    if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
-                    if (Math.abs(x) > 1e6 || Math.abs(y) > 1e6 || Math.abs(z) > 1e6) continue;
-                    // Skip if all three are exactly zero (common padding, not geometry)
-                    if (x === 0 && y === 0 && z === 0) continue;
-                    // At least one must have a non-trivial magnitude
-                    const mag = Math.abs(x) + Math.abs(y) + Math.abs(z);
-                    if (mag < 1e-15) continue;
+            // Scan the record for float64 BE triplets
+            for (let j = dataStart; j + 24 <= recordEnd; j++) {
+                const pt = this.tryReadTriplet(buf, j);
+                if (!pt) continue;
 
-                    const key = `${x.toFixed(6)},${y.toFixed(6)},${z.toFixed(6)}`;
-                    if (seen.has(key)) continue;
-                    seen.add(key);
+                const key = `${pt.x.toFixed(6)},${pt.y.toFixed(6)},${pt.z.toFixed(6)}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
 
-                    points.push({ x, y, z });
-                    if (points.length >= maxPoints) return points;
-                } catch {
-                    continue;
-                }
+                points.push(pt);
+                if (points.length >= maxPoints) return points;
             }
         }
 
         return points;
+    }
+
+    /**
+     * Fallback: scan the full buffer for BE float64 triplets (no markers).
+     * Uses stricter checks: at least one component must have |val| > 0.001.
+     * Skips the header/schema area (first ~0x400 bytes).
+     * @internal
+     */
+    private extractFromFullScan(buf: Buffer, maxPoints: number): PsPoint[] {
+        const points: PsPoint[] = [];
+        const seen = new Set<string>();
+
+        // Skip past the header + schema + class definitions (typically < 0x600)
+        // Find the last 'Z' (0x5A) in the first 4096 bytes as the end of class defs
+        let dataStart = 0x400;  // Conservative default
+        for (let i = Math.min(0x1000, buf.length) - 1; i >= 0x60; i--) {
+            if (buf[i] === 0x5a) { // 'Z' — schema end marker
+                dataStart = i + 1;
+                break;
+            }
+        }
+
+        for (let j = dataStart; j + 24 <= buf.length; j++) {
+            const pt = this.tryReadTriplet(buf, j);
+            if (!pt) continue;
+
+            // Stricter filter for markerless scan:
+            // at least one component must be significantly non-zero
+            const mx = Math.max(Math.abs(pt.x), Math.abs(pt.y), Math.abs(pt.z));
+            if (mx < 0.001) continue;
+
+            const key = `${pt.x.toFixed(6)},${pt.y.toFixed(6)},${pt.z.toFixed(6)}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+
+            points.push(pt);
+            if (points.length >= maxPoints) return points;
+        }
+
+        return points;
+    }
+
+    /** Try to read a float64 BE triplet at offset. Returns null if invalid. @internal */
+    private tryReadTriplet(buf: Buffer, offset: number): PsPoint | null {
+        if (offset + 24 > buf.length) return null;
+
+        const x = buf.readDoubleBE(offset);
+        const y = buf.readDoubleBE(offset + 8);
+        const z = buf.readDoubleBE(offset + 16);
+
+        // Must be finite and within engineering range
+        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return null;
+        if (Math.abs(x) > 1e4 || Math.abs(y) > 1e4 || Math.abs(z) > 1e4) return null;
+        // Skip if all three are exactly zero (common padding, not geometry)
+        if (x === 0 && y === 0 && z === 0) return null;
+        // At least one must have a non-trivial magnitude
+        const mag = Math.abs(x) + Math.abs(y) + Math.abs(z);
+        if (mag < 1e-15) return null;
+
+        return { x, y, z };
     }
 
     /**

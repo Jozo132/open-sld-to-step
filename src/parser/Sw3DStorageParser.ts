@@ -216,14 +216,20 @@ export class Sw3DStorageParser {
     }
 
     /**
-     * Convenience method: return only the first Parasolid section found, or
-     * `null` if none exists.
+     * Return the **largest** Parasolid section found, or `null` if none exists.
+     *
+     * SolidWorks 2015+ files may contain multiple PS-matching sections:
+     * a small partition header (just the schema) and the actual geometry.
+     * Picking the largest ensures we return the full BRep data.
      */
     static extractFirstParasolidSection(
         buf: Buffer,
         opts?: { maxDecompressedSize?: number },
     ): Sw3DParasolidResult | null {
-        const all = Sw3DStorageParser.extractParasolidSections(buf, { ...opts, maxResults: 1 });
-        return all.length > 0 ? all[0] : null;
+        const all = Sw3DStorageParser.extractParasolidSections(buf, { ...opts });
+        if (all.length === 0) return null;
+        // Return the largest section — the small one is typically a schema-only
+        // partition header with no entity records.
+        return all.reduce((best, cur) => cur.data.length > best.data.length ? cur : best);
     }
 }

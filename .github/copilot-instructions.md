@@ -24,7 +24,7 @@ src/
     OleContainerParser.ts           # OLE2/CFB parser (SolidWorks < 2015)
     Sw3DStorageParser.ts            # SW 3D Storage v4 parser (SolidWorks 2015+)
     SldprtContainerParser.ts        # High-level: detects format, extracts Parasolid
-    ParasolidParser.ts              # Parasolid binary transmit (.x_b) parser ← NEEDS WORK
+    ParasolidParser.ts              # Parasolid binary transmit (.x_b) parser
   step/
     ParasolidToStepMapper.ts        # PsModel → STEP entity graph (AP214)
     convertSldprtToStep.ts          # End-to-end: Buffer in → STEP string out
@@ -34,10 +34,10 @@ tests/
   sldprt-container-parser.test.ts   # ✅ passing
   brep-extraction.test.ts           # ✅ passing (77 tests, needs NIST samples)
   parasolid-to-step-mapper.test.ts  # ✅ passing
-  step-conversion.test.ts           # ❌ 47 failing — vertex extraction returns 0
+  step-conversion.test.ts           # ✅ passing (117 tests, needs NIST samples)
 scripts/
   download-nist-samples.mjs         # Downloads NIST MBE PMI test models
-  investigate[1-5].mjs              # Disposable binary exploration scripts
+  investigate[1-12].mjs             # Disposable binary exploration scripts
 wasm/assembly/
   geometry.ts                       # AssemblyScript stub (dot product, normalize, etc.)
 downloads/nist/                     # NIST sample files (not in git)
@@ -55,8 +55,8 @@ downloads/nist/                     # NIST sample files (not in git)
 
 ## Current Test Status
 
-- **195 passing, 47 failing** (all failures in `step-conversion.test.ts`)
-- All 5 other suites pass (242 total tests)
+- **242 passing, 0 failing** — all 6 suites green
+- Requires NIST sample files for integration tests (`npm run download-samples`)
 
 ## Data Pipeline
 
@@ -77,42 +77,21 @@ downloads/nist/                     # NIST sample files (not in git)
 
 **The `ParasolidParser.extractCoordinates()` method returns 0 vertices for all 11 NIST files.** This causes 47 test failures in `step-conversion.test.ts`.
 
-### Root cause
+### Solved problems
 
-The current `extractCoordinates()` scans for `=p` (0x3D 0x70) and `=q` (0x3D 0x71) record markers, then brute-force reads IEEE 754 float64 triplets nearby. This heuristic finds nothing in the NIST files because:
+1. **Section selection**: `extractFirstParasolidSection` was returning the first PS-matching section (a tiny ~1KB schema-only partition header). Fix: return the **largest** PS section, which contains the actual BRep geometry.
+2. **Endianness**: Float64 values are **Big Endian** (network byte order), not Little Endian. Confirmed by √2/2, 1.0, and other geometric constants.
+3. **Markerless records**: Some Parasolid editions (same schema version!) have NO `=p`/`=q` record markers at all. Fix: fallback to full-buffer BE float64 triplet scanning when no markers are found. Of 11 NIST files, 4 use `=p`/`=q` markers and 7 do not.
 
-- The Parasolid binary transmit format uses a **structured schema** with typed fields. Coordinate data is interleaved with entity reference IDs, type tags, and array-length prefixes. Blind triplet scanning misses them because the floats are not at predictable byte offsets after the `=p`/`=q` markers.
-- The `=p`/`=q` markers may not even be the correct record boundaries for the binary transmit version used by SolidWorks MBD 2018.
+### Future improvements
 
-### What needs to happen
+- **Schema-driven parsing**: The current approach is brute-force float scanning. A proper implementation would parse the schema section, map class IDs to field layouts, and decode each entity record structurally.
+- **Topology extraction**: Currently only vertices (point coordinates) are extracted. Full topology (edges, faces, loops, shells) would enable better STEP output.
+- **Surface/curve data**: Plane normals, cylinder axes, B-spline control points etc. are in the data but not yet extracted.
 
-The `ParasolidParser` needs to be rewritten to actually parse the binary transmit format structurally:
+### Files that are solid (do not need changes for basic operation)
 
-1. **Parse the schema section** — it defines entity class names and their field types (I=int32, d=float64, R=array, C=class-ref, etc.). The schema is near the top of the file, after the header.
-2. **Parse entity class definitions** — map class IDs to their field layouts.
-3. **Parse entity instance records** — use the schema to decode each record's fields in order, extracting float64 coordinate values from POINT/VERTEX entities specifically.
-
-### Key observations from investigation scripts
-
-- The Parasolid buffer starts with: `PS\x00\x00\x00?: TRANSMIT FILE (partition) created by modeller version NNNNNNN`
-- Schema ID follows: `SCH_<version>_<major>_<minor>`
-- Entity class names are present in the binary: BODY, SHELL, FACE, LOOP, EDGE, VERTEX, POINT, SURFACE, CURVE, etc.
-- Entity records have markers but their internal layout depends on the schema
-- All 11 NIST files are SW 3D Storage v4 format with the Parasolid data double-compressed (outer deflate → 28-byte header → inner zlib)
-
-### Files to change
-
-- `src/parser/ParasolidParser.ts` — rewrite `extractCoordinates()` and `parse()` to use schema-driven field decoding instead of brute-force float scanning
-- `tests/step-conversion.test.ts` — tests are correct as-is; they should pass once the parser works
-
-### Files that are solid (do not need changes)
-
-- `OleContainerParser.ts` — complete, tested
-- `Sw3DStorageParser.ts` — complete, tested, double-decompression works
-- `SldprtContainerParser.ts` — complete, tested
-- `ParasolidToStepMapper.ts` — complete, maps PsModel → STEP correctly
-- `convertSldprtToStep.ts` — complete, orchestrates the pipeline
-- `brep-extraction.test.ts` — 77/77 passing
+- All source files are complete and tested — 242/242 tests pass
 
 ## Parasolid Binary Transmit Format Notes
 
@@ -121,6 +100,6 @@ These are clean-room observations from the publicly available NIST test files (U
 - **Header**: `PS\x00\x00\x00` + ASCII text `?: TRANSMIT FILE (partition) created by modeller version <N>`
 - **Schema block**: starts with `SCH_` identifier, contains field-type descriptors
 - **Type codes**: `I` = int32, `d` = float64, `R` = array, `A` = sub-struct, `C` = class reference, `Z` = end marker
-- **Entity records**: prefixed by `=p` or `=q` markers, fields are packed in schema order
-- **Coordinates**: stored as 3 × float64 LE (24 bytes) inside POINT entity records
-- **References**: entity cross-references use int32 IDs (e.g., FACE → SURFACE, EDGE → CURVE)
+- **Entity records**: some editions prefix with `=p` (0x3D 0x70) or `=q` (0x3D 0x71) markers; others use a different encoding with no markers
+- **Coordinates**: stored as 3 × float64 **Big Endian** (24 bytes) inside POINT entity records
+- **References**: entity cross-references use int16 BE IDs (e.g., FACE → SURFACE, EDGE → CURVE)
