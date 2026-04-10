@@ -137,3 +137,6 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Downloaded sample CAD files (NIST MBE PMI test models)
+downloads/

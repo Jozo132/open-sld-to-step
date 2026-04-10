@@ -15,7 +15,9 @@
     "build": "tsc --project tsconfig.json",
     "test": "node --experimental-vm-modules node_modules/.bin/jest",
     "test:watch": "node --experimental-vm-modules node_modules/.bin/jest --watch",
-    "lint": "tsc --noEmit"
+    "test:integration": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=brep-extraction",
+    "lint": "tsc --noEmit",
+    "download-samples": "node scripts/download-nist-samples.mjs"
   },
   "keywords": [
     "solidworks",
