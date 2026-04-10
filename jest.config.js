@@ -17,6 +17,8 @@ const config = {
     },
     testMatch: ['**/tests/**/*.test.ts'],
     collectCoverageFrom: ['src/**/*.ts'],
+    maxWorkers: 1,
+    workerIdleMemoryLimit: '256MB',
 };
 
 export default config;

@@ -35,6 +35,14 @@ export type {
     ParasolidExtractResult,
 } from './parser/SldprtContainerParser.js';
 
+// Parasolid parser
+export {
+    ParasolidParser,
+} from './parser/ParasolidParser.js';
+export type {
+    PsTransmitHeader,
+} from './parser/ParasolidParser.js';
+
 // STEP mapper
 export {
     ParasolidToStepMapper,
@@ -53,3 +61,11 @@ export type {
     PsDirection,
     StepEntity,
 } from './step/ParasolidToStepMapper.js';
+
+// End-to-end conversion
+export {
+    convertSldprtToStep,
+} from './step/convertSldprtToStep.js';
+export type {
+    ConversionResult,
+} from './step/convertSldprtToStep.js';

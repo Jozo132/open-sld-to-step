@@ -15,7 +15,7 @@
  * Reference: clean-room analysis of SolidWorks 2015-2024 files.
  */
 
-import { inflateRawSync } from 'node:zlib';
+import { inflateRawSync, inflateSync } from 'node:zlib';
 
 // ── Section layout ────────────────────────────────────────────────────────────
 
@@ -56,12 +56,32 @@ export const PARASOLID_MAGIC_SIGNATURES: ReadonlyArray<Buffer> = [
     Buffer.from('PS-S', 'ascii'), // PS-SCHEMA
 ];
 
-/** Returns `true` if the buffer starts with a recognised Parasolid magic. */
+/**
+ * Returns `true` if the buffer starts with a recognised Parasolid magic,
+ * including the binary transmit format (header: `PS\x00\x00\x00` with
+ * `TRANSMIT` at byte 8).
+ */
 export function isParasolidBuffer(buf: Buffer): boolean {
     if (buf.length < 4) return false;
     const head = buf.subarray(0, 4);
-    return PARASOLID_MAGIC_SIGNATURES.some(sig => sig.equals(head));
+    if (PARASOLID_MAGIC_SIGNATURES.some(sig => sig.equals(head))) return true;
+    // Binary transmit format: starts with 'PS' + 3 bytes, then 'TRANSMIT' near offset 8
+    if (buf.length >= 20 && buf[0] === 0x50 && buf[1] === 0x53) {
+        const slice = buf.subarray(5, 20);
+        if (slice.includes(0x54 /* 'T' */)) {
+            const idx = buf.indexOf('TRANSMIT', 0, 'ascii');
+            if (idx >= 0 && idx < 32) return true;
+        }
+    }
+    return false;
 }
+
+/**
+ * Byte size of the header preceding a nested zlib Parasolid stream inside
+ * an SW 3D Storage section. The header contains sizes and a hash; the
+ * actual Parasolid data begins as a zlib-compressed blob at this offset.
+ */
+const NESTED_ZLIB_OFFSET = 28;
 
 // ── Result types ──────────────────────────────────────────────────────────────
 
@@ -91,6 +111,28 @@ export interface Sw3DParasolidResult {
 // ── Parser ────────────────────────────────────────────────────────────────────
 
 /**
+ * Attempt to decompress a nested zlib stream inside a section payload.
+ *
+ * SolidWorks 2015+ files embed the Parasolid transmit file behind a 28-byte
+ * header (sizes + hash).  Byte 28 is the start of a standard zlib stream
+ * (0x78 …).
+ *
+ * @returns The decompressed inner buffer, or `null` on failure.
+ * @internal
+ */
+function tryNestedDecompress(outer: Buffer, maxOutput = 50_000_000): Buffer | null {
+    if (outer.length <= NESTED_ZLIB_OFFSET) return null;
+    const zlibByte = outer[NESTED_ZLIB_OFFSET];
+    // zlib streams start with 0x78 (deflate, 32K window)
+    if (zlibByte !== 0x78) return null;
+    try {
+        return inflateSync(outer.subarray(NESTED_ZLIB_OFFSET), { maxOutputLength: maxOutput });
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Parse a raw SolidWorks 3D Storage v4 buffer and extract sections.
  *
  * @param buf   Full contents of a `.SLDPRT` (or other SolidWorks) file.
@@ -106,9 +148,10 @@ export class Sw3DStorageParser {
      */
     static extractParasolidSections(
         buf: Buffer,
-        opts: { maxDecompressedSize?: number } = {},
+        opts: { maxDecompressedSize?: number; maxResults?: number } = {},
     ): Sw3DParasolidResult[] {
-        const maxDec = opts.maxDecompressedSize ?? 500_000_000; // 500 MB guard
+        const maxDec = opts.maxDecompressedSize ?? 50_000_000; // 50 MB guard
+        const maxResults = opts.maxResults ?? Infinity;
         const results: Sw3DParasolidResult[] = [];
         let idx = 0;
 
@@ -145,7 +188,21 @@ export class Sw3DStorageParser {
                                 typeId,
                                 data: decompressed,
                             });
+                        } else {
+                            // SW 3D Storage v4 double-compression:
+                            // Some sections carry a 28-byte header followed
+                            // by a nested zlib stream containing the actual
+                            // Parasolid transmit file.
+                            const nested = tryNestedDecompress(decompressed, maxDec);
+                            if (nested && isParasolidBuffer(nested)) {
+                                results.push({
+                                    offset: idx,
+                                    typeId,
+                                    data: nested,
+                                });
+                            }
                         }
+                        if (results.length >= maxResults) return results;
                     } catch {
                         // Not a valid deflate stream at this position – skip
                     }
@@ -166,7 +223,7 @@ export class Sw3DStorageParser {
         buf: Buffer,
         opts?: { maxDecompressedSize?: number },
     ): Sw3DParasolidResult | null {
-        const all = Sw3DStorageParser.extractParasolidSections(buf, opts);
+        const all = Sw3DStorageParser.extractParasolidSections(buf, { ...opts, maxResults: 1 });
         return all.length > 0 ? all[0] : null;
     }
 }

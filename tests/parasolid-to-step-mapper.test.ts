@@ -124,8 +124,8 @@ describe('ParasolidToStepMapper.toStepFile', () => {
         expect(output).toContain('my_model.stp');
     });
 
-    it('contains FILE_SCHEMA with AP214', () => {
+    it('contains FILE_SCHEMA with AUTOMOTIVE_DESIGN', () => {
         const output = ParasolidToStepMapper.toStepFile([]);
-        expect(output).toContain('AP214');
+        expect(output).toContain('AUTOMOTIVE_DESIGN');
     });
 });

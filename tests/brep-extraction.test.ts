@@ -56,13 +56,39 @@ const hasSamples = sampleFiles.length > 0;
  */
 const describeWithSamples = hasSamples ? describe : describe.skip;
 
+// ── Shared caches to avoid repeated file reads / extractions ────────────────
+
+const fileCache = new Map<string, Buffer>();
+function getCachedFile(filePath: string): Buffer {
+    if (fileCache.has(filePath)) return fileCache.get(filePath)!;
+    const buf = readFileSync(filePath);
+    fileCache.set(filePath, buf);
+    return buf;
+}
+
+import type { ParasolidExtractResult } from '../src/parser/SldprtContainerParser.js';
+
+const extractionCache = new Map<string, ParasolidExtractResult | null>();
+function getCachedExtraction(filePath: string): ParasolidExtractResult | null {
+    if (extractionCache.has(filePath)) return extractionCache.get(filePath)!;
+    const buf = getCachedFile(filePath);
+    const result = SldprtContainerParser.extractParasolid(buf);
+    extractionCache.set(filePath, result);
+    return result;
+}
+
 // ── Container format detection tests ────────────────────────────────────────
+
+afterAll(() => {
+    fileCache.clear();
+    extractionCache.clear();
+});
 
 describeWithSamples('NIST SLDPRT samples — container detection', () => {
     it.each(sampleFiles.map(f => [basename(f), f]))(
         '%s is recognised as either OLE2 or SW 3D Storage',
         (_name, filePath) => {
-            const buf = readFileSync(filePath as string);
+            const buf = getCachedFile(filePath as string);
             expect(buf.length).toBeGreaterThan(0);
 
             // Must be one of our two known containers
@@ -81,8 +107,7 @@ describeWithSamples('NIST SLDPRT samples — BRep stream extraction', () => {
     it.each(sampleFiles.map(f => [basename(f), f]))(
         '%s yields a non-null extractParasolid result',
         (_name, filePath) => {
-            const buf = readFileSync(filePath as string);
-            const result = SldprtContainerParser.extractParasolid(buf);
+            const result = getCachedExtraction(filePath as string);
 
             // Every genuine SLDPRT should produce a result
             expect(result).not.toBeNull();
@@ -92,8 +117,7 @@ describeWithSamples('NIST SLDPRT samples — BRep stream extraction', () => {
     it.each(sampleFiles.map(f => [basename(f), f]))(
         '%s → extracted BRep data has length > 0',
         (_name, filePath) => {
-            const buf = readFileSync(filePath as string);
-            const result = SldprtContainerParser.extractParasolid(buf);
+            const result = getCachedExtraction(filePath as string);
             if (!result) return; // guarded by the test above
             expect(result.data.length).toBeGreaterThan(0);
         },
@@ -102,8 +126,7 @@ describeWithSamples('NIST SLDPRT samples — BRep stream extraction', () => {
     it.each(sampleFiles.map(f => [basename(f), f]))(
         '%s → extracted stream starts with a known Parasolid magic',
         (_name, filePath) => {
-            const buf = readFileSync(filePath as string);
-            const result = SldprtContainerParser.extractParasolid(buf);
+            const result = getCachedExtraction(filePath as string);
             if (!result) return;
 
             // The decompressed BRep buffer should begin with one of
@@ -115,8 +138,7 @@ describeWithSamples('NIST SLDPRT samples — BRep stream extraction', () => {
     it.each(sampleFiles.map(f => [basename(f), f]))(
         '%s → format is "ole2" or "sw3d"',
         (_name, filePath) => {
-            const buf = readFileSync(filePath as string);
-            const result = SldprtContainerParser.extractParasolid(buf);
+            const result = getCachedExtraction(filePath as string);
             if (!result) return;
             expect(['ole2', 'sw3d']).toContain(result.format);
         },
@@ -129,8 +151,7 @@ describeWithSamples('NIST SLDPRT samples — Parasolid header sanity', () => {
     it.each(sampleFiles.map(f => [basename(f), f]))(
         '%s → BRep buffer is at least 64 bytes',
         (_name, filePath) => {
-            const buf = readFileSync(filePath as string);
-            const result = SldprtContainerParser.extractParasolid(buf);
+            const result = getCachedExtraction(filePath as string);
             if (!result) return;
             // Any real Parasolid BRep will be much larger, but 64 bytes
             // rules out empty / corrupt streams.
@@ -141,8 +162,7 @@ describeWithSamples('NIST SLDPRT samples — Parasolid header sanity', () => {
     it.each(sampleFiles.map(f => [basename(f), f]))(
         '%s → BRep buffer contains ASCII text or binary Parasolid blocks',
         (_name, filePath) => {
-            const buf = readFileSync(filePath as string);
-            const result = SldprtContainerParser.extractParasolid(buf);
+            const result = getCachedExtraction(filePath as string);
             if (!result) return;
 
             const head = result.data.subarray(0, 32);
