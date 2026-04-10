@@ -1,0 +1,40 @@
+{
+  "name": "open-sld-to-step",
+  "version": "0.1.0",
+  "description": "Clean-room OLE/CFB + SolidWorks 3D-Storage parser that extracts Parasolid BRep streams from .SLDPRT files and converts them to ISO 10303 STEP files.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "test:watch": "node --experimental-vm-modules node_modules/.bin/jest --watch",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "solidworks",
+    "sldprt",
+    "step",
+    "iso10303",
+    "parasolid",
+    "ole2",
+    "cfb",
+    "cad",
+    "brep"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.15.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.3.2",
+    "typescript": "^5.8.3"
+  }
+}
