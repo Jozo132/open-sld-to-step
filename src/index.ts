@@ -41,6 +41,7 @@ export {
 } from './parser/ParasolidParser.js';
 export type {
     PsTransmitHeader,
+    PsEntityCensus,
 } from './parser/ParasolidParser.js';
 
 // STEP mapper
