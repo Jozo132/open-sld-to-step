@@ -647,6 +647,416 @@ export class ParasolidParser {
         return surfaces;
     }
 
+    // ── Surface deduplication ────────────────────────────────────────────────
+
+    /**
+     * Tolerance constants for surface deduplication and vertex association.
+     * All distances in mm (already PS_TO_MM-scaled).
+     */
+    private static readonly NORMAL_TOL = 0.001;   // radians (dot product tolerance)
+    private static readonly PLANE_DIST_TOL = 0.5;  // mm — plane equation match
+    private static readonly VERTEX_PLANE_TOL = 0.5; // mm — vertex on plane
+    private static readonly CYL_AXIS_TOL = 0.001;  // radians
+    private static readonly CYL_ORIGIN_TOL = 0.5;   // mm — axis line distance
+    private static readonly CYL_RADIUS_TOL = 0.01;  // mm
+    private static readonly VERTEX_CYL_TOL = 0.5;   // mm — vertex on cylinder
+
+    /**
+     * Deduplicate surfaces with the same geometric equation.
+     * Planes with same normal and perpendicular distance are merged.
+     * Cylinders with same axis line and radius are merged.
+     * Returns one representative surface per unique equation.
+     * @internal
+     */
+    private deduplicateSurfaces(surfaces: PsSurface[]): PsSurface[] {
+        const unique: PsSurface[] = [];
+
+        for (const surf of surfaces) {
+            const p = surf.params as Record<string, unknown>;
+            let isDup = false;
+
+            for (const existing of unique) {
+                if (existing.surfaceType !== surf.surfaceType) continue;
+                const ep = existing.params as Record<string, unknown>;
+
+                if (surf.surfaceType === 'plane') {
+                    const n1 = p.normal as PsPoint;
+                    const n2 = ep.normal as PsPoint;
+                    const dot = n1.x * n2.x + n1.y * n2.y + n1.z * n2.z;
+                    if (Math.abs(Math.abs(dot) - 1) >= ParasolidParser.NORMAL_TOL) continue;
+                    const o1 = p.origin as PsPoint;
+                    const o2 = ep.origin as PsPoint;
+                    const d1 = n1.x * o1.x + n1.y * o1.y + n1.z * o1.z;
+                    const d2 = n2.x * o2.x + n2.y * o2.y + n2.z * o2.z;
+                    const sign = dot > 0 ? 1 : -1;
+                    if (Math.abs(d1 - sign * d2) < ParasolidParser.PLANE_DIST_TOL) {
+                        isDup = true;
+                        break;
+                    }
+                } else if (surf.surfaceType === 'cylinder' || surf.surfaceType === 'cone') {
+                    const a1 = p.axis as PsPoint;
+                    const a2 = ep.axis as PsPoint;
+                    const dot = a1.x * a2.x + a1.y * a2.y + a1.z * a2.z;
+                    if (Math.abs(Math.abs(dot) - 1) >= ParasolidParser.CYL_AXIS_TOL) continue;
+                    const r1 = p.radius as number;
+                    const r2 = ep.radius as number;
+                    if (Math.abs(r1 - r2) >= ParasolidParser.CYL_RADIUS_TOL) continue;
+                    // Check colinearity of origins (perpendicular distance to axis line)
+                    const o1 = p.origin as PsPoint;
+                    const o2 = ep.origin as PsPoint;
+                    const dx = o1.x - o2.x, dy = o1.y - o2.y, dz = o1.z - o2.z;
+                    const proj = dx * a2.x + dy * a2.y + dz * a2.z;
+                    const px = dx - proj * a2.x, py = dy - proj * a2.y, pz = dz - proj * a2.z;
+                    if (Math.sqrt(px * px + py * py + pz * pz) < ParasolidParser.CYL_ORIGIN_TOL) {
+                        isDup = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!isDup) unique.push(surf);
+        }
+
+        return unique;
+    }
+
+    /**
+     * Associate vertices with surfaces they lie on (within tolerance).
+     * Returns a Map from surface ID to array of vertex indices (0-based).
+     * @internal
+     */
+    private associateVertices(
+        surfaces: PsSurface[],
+        vertices: PsVertex[],
+    ): Map<number, number[]> {
+        const assoc = new Map<number, number[]>();
+
+        for (const surf of surfaces) {
+            const p = surf.params as Record<string, unknown>;
+            const indices: number[] = [];
+
+            if (surf.surfaceType === 'plane') {
+                const origin = p.origin as PsPoint;
+                const normal = p.normal as PsPoint;
+                for (let i = 0; i < vertices.length; i++) {
+                    const v = vertices[i].position;
+                    const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                    const dist = Math.abs(dx * normal.x + dy * normal.y + dz * normal.z);
+                    if (dist < ParasolidParser.VERTEX_PLANE_TOL) indices.push(i);
+                }
+            } else if (surf.surfaceType === 'cylinder' || surf.surfaceType === 'cone') {
+                const origin = p.origin as PsPoint;
+                const axis = p.axis as PsPoint;
+                const radius = p.radius as number;
+                for (let i = 0; i < vertices.length; i++) {
+                    const v = vertices[i].position;
+                    const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                    const along = dx * axis.x + dy * axis.y + dz * axis.z;
+                    const px = dx - along * axis.x, py = dy - along * axis.y, pz = dz - along * axis.z;
+                    const radDist = Math.sqrt(px * px + py * py + pz * pz);
+                    if (Math.abs(radDist - radius) < ParasolidParser.VERTEX_CYL_TOL) indices.push(i);
+                }
+            }
+
+            assoc.set(surf.id, indices);
+        }
+
+        return assoc;
+    }
+
+    /**
+     * Compute 2D convex hull using Andrew's monotone chain algorithm.
+     * Input: array of {u, v, idx} points. Returns hull in CCW order.
+     * @internal
+     */
+    private static convexHull2D(
+        pts: Array<{ u: number; v: number; idx: number }>,
+    ): Array<{ u: number; v: number; idx: number }> {
+        if (pts.length <= 2) return [...pts];
+
+        const sorted = pts.slice().sort((a, b) => a.u - b.u || a.v - b.v);
+        const n = sorted.length;
+
+        // Remove near-duplicate points
+        const unique: typeof sorted = [sorted[0]];
+        for (let i = 1; i < n; i++) {
+            const prev = unique[unique.length - 1];
+            if (Math.abs(sorted[i].u - prev.u) > 1e-6 || Math.abs(sorted[i].v - prev.v) > 1e-6) {
+                unique.push(sorted[i]);
+            }
+        }
+        if (unique.length <= 1) return unique;
+        if (unique.length === 2) return unique;
+
+        const cross = (o: typeof sorted[0], a: typeof sorted[0], b: typeof sorted[0]) =>
+            (a.u - o.u) * (b.v - o.v) - (a.v - o.v) * (b.u - o.u);
+
+        // Lower hull
+        const lower: typeof sorted = [];
+        for (const p of unique) {
+            while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0)
+                lower.pop();
+            lower.push(p);
+        }
+        // Upper hull
+        const upper: typeof sorted = [];
+        for (let i = unique.length - 1; i >= 0; i--) {
+            const p = unique[i];
+            while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0)
+                upper.pop();
+            upper.push(p);
+        }
+
+        // Remove last point of each half (it's the first of the other)
+        lower.pop();
+        upper.pop();
+        return lower.concat(upper);
+    }
+
+    /**
+     * Build an orthonormal basis on a plane with the given normal.
+     * Returns {uAxis, vAxis} perpendicular to the normal.
+     * @internal
+     */
+    private static planeBasis(normal: PsPoint): { uAxis: PsPoint; vAxis: PsPoint } {
+        // Pick an axis not parallel to the normal
+        const arbitrary: PsPoint = Math.abs(normal.z) < 0.9
+            ? { x: 0, y: 0, z: 1 }
+            : { x: 1, y: 0, z: 0 };
+        // U = normalize(cross(normal, arbitrary))
+        let ux = normal.y * arbitrary.z - normal.z * arbitrary.y;
+        let uy = normal.z * arbitrary.x - normal.x * arbitrary.z;
+        let uz = normal.x * arbitrary.y - normal.y * arbitrary.x;
+        const uLen = Math.sqrt(ux * ux + uy * uy + uz * uz);
+        ux /= uLen; uy /= uLen; uz /= uLen;
+        // V = cross(normal, U)
+        const vx = normal.y * uz - normal.z * uy;
+        const vy = normal.z * ux - normal.x * uz;
+        const vz = normal.x * uy - normal.y * ux;
+        return { uAxis: { x: ux, y: uy, z: uz }, vAxis: { x: vx, y: vy, z: vz } };
+    }
+
+    /**
+     * Build face topology with proper edge loop boundaries derived from
+     * vertex positions associated with each surface.
+     *
+     * For planes: vertices are projected to 2D, a convex hull is computed,
+     * and the hull polygon becomes the face boundary (LINE edges).
+     *
+     * For cylinders: vertices are projected to (height, angle), and two
+     * CIRCLE edges at min/max height + two LINE seam edges form the boundary.
+     *
+     * @internal
+     */
+    private buildBoundedTopology(
+        surfaces: PsSurface[],
+        vertices: PsVertex[],
+        vertexSurfaceMap: Map<number, number[]>,
+    ): {
+        faces: PsFace[];
+        loops: PsLoop[];
+        edges: PsEdge[];
+        curves: PsCurve[];
+        extraVertices: PsVertex[];
+    } {
+        const faces: PsFace[] = [];
+        const loops: PsLoop[] = [];
+        const edges: PsEdge[] = [];
+        const curves: PsCurve[] = [];
+        const extraVertices: PsVertex[] = [];
+
+        let nextFaceId = 1;
+        let nextLoopId = 1;
+        let nextEdgeId = 1;
+        let nextCurveId = 1;
+        let nextExtraVtxId = vertices.length + 1;
+
+        for (const surf of surfaces) {
+            const assocIndices = vertexSurfaceMap.get(surf.id) ?? [];
+            // Require at least 3 associated vertices for a meaningful face
+            if (assocIndices.length < 3) continue;
+
+            const p = surf.params as Record<string, unknown>;
+
+            if (surf.surfaceType === 'plane') {
+                const origin = p.origin as PsPoint;
+                const normal = p.normal as PsPoint;
+                const { uAxis, vAxis } = ParasolidParser.planeBasis(normal);
+
+                // Project vertices to 2D
+                const pts2D = assocIndices.map(i => {
+                    const v = vertices[i].position;
+                    const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                    return {
+                        u: dx * uAxis.x + dy * uAxis.y + dz * uAxis.z,
+                        v: dx * vAxis.x + dy * vAxis.y + dz * vAxis.z,
+                        idx: i,
+                    };
+                });
+
+                const hull = ParasolidParser.convexHull2D(pts2D);
+                if (hull.length < 3) continue;
+
+                // Create LINE edges along the hull polygon
+                const loopEdges: number[] = [];
+                const loopSenses: boolean[] = [];
+
+                for (let hi = 0; hi < hull.length; hi++) {
+                    const startIdx = hull[hi].idx;
+                    const endIdx = hull[(hi + 1) % hull.length].idx;
+                    const sv = vertices[startIdx];
+                    const ev = vertices[endIdx];
+
+                    const curveId = nextCurveId++;
+                    curves.push({
+                        id: curveId,
+                        curveType: 'line',
+                        params: { start: sv.position, end: ev.position },
+                    });
+
+                    const edgeId = nextEdgeId++;
+                    edges.push({
+                        id: edgeId,
+                        startVertex: sv.id,
+                        endVertex: ev.id,
+                        curve: curveId,
+                        sense: true,
+                    });
+
+                    loopEdges.push(edgeId);
+                    loopSenses.push(true);
+                }
+
+                const loopId = nextLoopId++;
+                loops.push({ id: loopId, edges: loopEdges, senses: loopSenses });
+
+                const faceId = nextFaceId++;
+                faces.push({
+                    id: faceId,
+                    surface: surf.id,
+                    outerLoop: loopId,
+                    innerLoops: [],
+                    sense: true,
+                });
+            } else if (surf.surfaceType === 'cylinder') {
+                const origin = p.origin as PsPoint;
+                const axis = p.axis as PsPoint;
+                const radius = p.radius as number;
+                const { uAxis, vAxis } = ParasolidParser.planeBasis(axis);
+
+                // Project vertices along axis to find height extent
+                const heights: number[] = [];
+                for (const i of assocIndices) {
+                    const v = vertices[i].position;
+                    const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                    heights.push(dx * axis.x + dy * axis.y + dz * axis.z);
+                }
+                const hMin = Math.min(...heights);
+                const hMax = Math.max(...heights);
+                if (Math.abs(hMax - hMin) < 0.01) continue; // degenerate
+
+                // Create 4 boundary points (2 on top circle, 2 on bottom circle)
+                // Place seam at the U-axis direction
+                const bottomCenter: PsPoint = {
+                    x: origin.x + hMin * axis.x,
+                    y: origin.y + hMin * axis.y,
+                    z: origin.z + hMin * axis.z,
+                };
+                const topCenter: PsPoint = {
+                    x: origin.x + hMax * axis.x,
+                    y: origin.y + hMax * axis.y,
+                    z: origin.z + hMax * axis.z,
+                };
+
+                // Seam point on each circle (at uAxis direction)
+                const botSeam: PsPoint = {
+                    x: bottomCenter.x + radius * uAxis.x,
+                    y: bottomCenter.y + radius * uAxis.y,
+                    z: bottomCenter.z + radius * uAxis.z,
+                };
+                const topSeam: PsPoint = {
+                    x: topCenter.x + radius * uAxis.x,
+                    y: topCenter.y + radius * uAxis.y,
+                    z: topCenter.z + radius * uAxis.z,
+                };
+
+                // Create 2 extra vertices for the seam points
+                const botVtxId = nextExtraVtxId++;
+                const topVtxId = nextExtraVtxId++;
+                extraVertices.push({ id: botVtxId, position: botSeam });
+                extraVertices.push({ id: topVtxId, position: topSeam });
+
+                // Bottom circle curve
+                const botCircleCurveId = nextCurveId++;
+                curves.push({
+                    id: botCircleCurveId,
+                    curveType: 'circle',
+                    params: { center: bottomCenter, normal: axis, radius },
+                });
+                // Top circle curve
+                const topCircleCurveId = nextCurveId++;
+                curves.push({
+                    id: topCircleCurveId,
+                    curveType: 'circle',
+                    params: { center: topCenter, normal: axis, radius },
+                });
+                // Left seam line (bottom → top)
+                const seamLine1Id = nextCurveId++;
+                curves.push({
+                    id: seamLine1Id,
+                    curveType: 'line',
+                    params: { start: botSeam, end: topSeam },
+                });
+
+                // Edges: bottom circle (botSeam→botSeam), seam up, top circle, seam down
+                const botCircleEdgeId = nextEdgeId++;
+                edges.push({
+                    id: botCircleEdgeId,
+                    startVertex: botVtxId,
+                    endVertex: botVtxId,  // closed circle
+                    curve: botCircleCurveId,
+                    sense: true,
+                });
+                const seamUpEdgeId = nextEdgeId++;
+                edges.push({
+                    id: seamUpEdgeId,
+                    startVertex: botVtxId,
+                    endVertex: topVtxId,
+                    curve: seamLine1Id,
+                    sense: true,
+                });
+                const topCircleEdgeId = nextEdgeId++;
+                edges.push({
+                    id: topCircleEdgeId,
+                    startVertex: topVtxId,
+                    endVertex: topVtxId,  // closed circle
+                    curve: topCircleCurveId,
+                    sense: true,
+                });
+
+                // Edge loop: bottom circle → seam up → top circle (reversed) → seam down (reversed)
+                const loopId = nextLoopId++;
+                loops.push({
+                    id: loopId,
+                    edges: [botCircleEdgeId, seamUpEdgeId, topCircleEdgeId, seamUpEdgeId],
+                    senses: [true, true, false, false],
+                });
+
+                const faceId = nextFaceId++;
+                faces.push({
+                    id: faceId,
+                    surface: surf.id,
+                    outerLoop: loopId,
+                    innerLoops: [],
+                    sense: true,
+                });
+            }
+            // cones, spheres, etc. — skip for now
+        }
+
+        return { faces, loops, edges, curves, extraVertices };
+    }
+
     /** Try to read a float64 BE triplet at offset. Returns null if invalid. @internal */
     private tryReadTriplet(buf: Buffer, offset: number): PsPoint | null {
         if (offset + 24 > buf.length) return null;
@@ -698,33 +1108,27 @@ export class ParasolidParser {
             },
         }));
 
-        // ── Surface extraction ──────────────────────────────────────────
-        const surfaces = this.extractSurfaces();
+        // ── Surface extraction and deduplication ─────────────────────────
+        const rawSurfaces = this.extractSurfaces();
+        const surfaces = this.deduplicateSurfaces(rawSurfaces);
 
-        // ── Synthetic topology ──────────────────────────────────────────
-        // Each surface gets a face with an empty edge loop.  This is the
-        // minimum topology required for valid ADVANCED_BREP output.
-        const loops: PsLoop[] = [];
-        const faces: PsFace[] = [];
-        const edges: PsEdge[] = [];
-        const curves: PsCurve[] = [];
+        // Re-number deduplicated surfaces sequentially
+        surfaces.forEach((s, i) => { s.id = i + 1; });
 
-        for (const surf of surfaces) {
-            const loopId = surf.id;   // 1:1 with surface IDs
-            loops.push({ id: loopId, edges: [], senses: [] });
-            faces.push({
-                id: surf.id,
-                surface: surf.id,
-                outerLoop: loopId,
-                innerLoops: [],
-                sense: true,
-            });
-        }
+        // ── Vertex-surface association and bounded topology ─────────────
+        const vertexSurfaceMap = this.associateVertices(surfaces, vertices);
+
+        const {
+            faces, loops, edges, curves, extraVertices,
+        } = this.buildBoundedTopology(surfaces, vertices, vertexSurfaceMap);
+
+        // Add any extra vertices created for cylinder seam points
+        vertices.push(...extraVertices);
 
         const shells: PsShell[] = faces.length > 0 ? [{
             id: 1,
             faces: faces.map(f => f.id),
-            closed: false,
+            closed: true,
         }] : [];
 
         const bodies: PsBody[] = shells.length > 0 ? [{
