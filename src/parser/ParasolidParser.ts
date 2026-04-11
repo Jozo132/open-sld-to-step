@@ -127,6 +127,13 @@ const POINT_COORD_OFFSET = 16;
  */
 const SUB_RECORD_SEP = Buffer.from([0x00, 0x01, 0x00, 0x01, 0x00, 0x03]);
 
+/**
+ * Parasolid stores coordinates in meters; STEP declares MILLIMETRE as the
+ * length unit.  All positional coordinates and radii are scaled by this
+ * factor during parse().
+ */
+const PS_TO_MM = 1000;
+
 /** Parsed sub-record entity within a sentinel block. */
 interface RawEntity {
     /** Entity type code (e.g. 0x1E for surface/curve). */
@@ -590,17 +597,24 @@ export class ParasolidParser {
 
                 if (radius <= 0 || radius > 1e4) continue;
 
+                const sOrigin: PsPoint = {
+                    x: origin.x * PS_TO_MM,
+                    y: origin.y * PS_TO_MM,
+                    z: origin.z * PS_TO_MM,
+                };
+                const sRadius = radius * PS_TO_MM;
+
                 if (Math.abs(semiAngle) < 1e-6) {
                     surfaces.push({
                         id: nextId++,
                         surfaceType: 'cylinder',
-                        params: { origin, axis, radius },
+                        params: { origin: sOrigin, axis, radius: sRadius },
                     });
                 } else {
                     surfaces.push({
                         id: nextId++,
                         surfaceType: 'cone',
-                        params: { origin, axis, radius, halfAngle: semiAngle },
+                        params: { origin: sOrigin, axis, radius: sRadius, halfAngle: semiAngle },
                     });
                 }
             } else if (floats.length === 7 || floats.length === 8) {
@@ -617,7 +631,14 @@ export class ParasolidParser {
                 surfaces.push({
                     id: nextId++,
                     surfaceType: 'plane',
-                    params: { origin, normal },
+                    params: {
+                        origin: {
+                            x: origin.x * PS_TO_MM,
+                            y: origin.y * PS_TO_MM,
+                            z: origin.z * PS_TO_MM,
+                        },
+                        normal,
+                    },
                 });
             }
             // Other float counts (9, 10, 13+) → skip for now (B-spline, torus, etc.)
@@ -670,7 +691,11 @@ export class ParasolidParser {
 
         const vertices: PsVertex[] = points.map((pt, idx) => ({
             id: idx + 1,
-            position: pt,
+            position: {
+                x: pt.x * PS_TO_MM,
+                y: pt.y * PS_TO_MM,
+                z: pt.z * PS_TO_MM,
+            },
         }));
 
         // ── Surface extraction ──────────────────────────────────────────

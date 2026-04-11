@@ -41,6 +41,7 @@ scripts/
 wasm/assembly/
   geometry.ts                       # AssemblyScript stub (dot product, normalize, etc.)
 downloads/nist/                     # NIST sample files (not in git)
+output/                             # Generated STEP files (not in git)
 ```
 
 ## Commands
@@ -51,6 +52,7 @@ downloads/nist/                     # NIST sample files (not in git)
 | `npm run test:integration` | Run only `brep-extraction.test.ts` |
 | `npm run build` | TypeScript → `dist/` |
 | `npm run lint` | Type-check without emit |
+| `npm run convert` | Build + batch-convert all NIST .SLDPRT → .stp in `./output/` |
 | `npm run download-samples` | Fetch NIST SolidWorks MBD 2018 test files |
 
 ## Current Test Status
@@ -88,7 +90,7 @@ downloads/nist/                     # NIST sample files (not in git)
 
 ### Future improvements
 
-- **Unit conversion**: PS stores coordinates in meters, STEP declares MILLIMETRE. All coordinates need ×1000 scaling (PS origin ±0.4 → STEP ±400mm). Currently passed through unscaled.
+- **Unit conversion**: ✅ Implemented. PS meters × 1000 → STEP mm. Applied to vertex positions, surface origins, and cylinder/cone radii.
 - **Edge/loop topology**: Faces currently have empty edge loops. Real topology requires extracting face→loop→edge→vertex reference chains from the binary data. Sub-record separator works for geometry but NOT for topology entities (only 1 face found vs 139 expected).
 - **Plane vs line discrimination**: 7-float entities include both PLANEs and LINE curves (indistinguishable by structure alone). Needs context from topology references or perpendicular-distance heuristics.
 - **Cone detection**: 11-float entities with non-zero semiAngle are cones — implemented but untested (no cones in the tested files).

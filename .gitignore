@@ -141,3 +141,6 @@ vite.config.ts.timestamp-*
 # Downloaded sample CAD files (NIST MBE PMI test models)
 downloads/
 **/inv*output*.txt
+
+# Generated STEP output files
+output/
