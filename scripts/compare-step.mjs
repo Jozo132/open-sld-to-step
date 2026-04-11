@@ -31,7 +31,7 @@ function parseStepEntities(text) {
     if (dataStart < 0 || dataEnd < 0) return entities;
     const data = dataSection.slice(dataStart + 5, dataEnd);
 
-    const joined = data.replace(/\n(?!#)/g, '');
+    const joined = data.replace(/\n(?!#\d+=)/g, '');
     const reLine = /^#(\d+)\s*=\s*(.+);$/gm;
 
     let m;
