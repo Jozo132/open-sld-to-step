@@ -1,6 +1,7 @@
 /**
  * investigate11.mjs — Examine the Parasolid data from failing files
  * that have 0 =p/=q markers. These may be text-format Parasolid.
+ * Clean-room analysis of public-domain NIST test files.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';

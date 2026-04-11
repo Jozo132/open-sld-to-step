@@ -2,6 +2,7 @@
  * investigate12.mjs — Find record delimiters in failing Parasolid files.
  * Check all 0x3d (=) + next byte patterns, and look for
  * any other repeating delimiters/markers.
+ * Clean-room analysis of public-domain NIST test files.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';

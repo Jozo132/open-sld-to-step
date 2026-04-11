@@ -1,3 +1,7 @@
+/**
+ * investigate3.mjs
+ * Clean-room analysis of public-domain NIST test files.
+ */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { inflateRawSync, inflateSync } from 'node:zlib';

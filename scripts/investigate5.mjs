@@ -1,3 +1,7 @@
+/**
+ * investigate5.mjs
+ * Clean-room analysis of public-domain NIST test files.
+ */
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';

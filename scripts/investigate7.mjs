@@ -1,5 +1,6 @@
 /**
  * investigate7.mjs — Find ALL Parasolid-related sections in SW3D storage
+ * Clean-room analysis of public-domain NIST test files.
  *
  * The first "PS" section is only 1687 bytes (just schema+partition header).
  * The real geometry must be in another section. Let's find it.

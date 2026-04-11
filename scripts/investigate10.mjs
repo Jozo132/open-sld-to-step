@@ -1,6 +1,7 @@
 /**
  * investigate10.mjs — Check ALL failing NIST files to understand why
  * some still return 0 vertices after the BE + largest-section fix.
+ * Clean-room analysis of public-domain NIST test files.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';

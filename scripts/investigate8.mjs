@@ -1,5 +1,6 @@
 /**
  * investigate8.mjs — Deep-dive into the REAL Parasolid geometry section
+ * Clean-room analysis of public-domain NIST test files.
  *
  * Section §15 @14457 has 129,095 bytes with 106 =p and 24 =q markers,
  * plus BODY and FACE class names. THIS is the actual geometry.

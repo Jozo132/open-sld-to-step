@@ -1,6 +1,7 @@
 /**
  * investigate9.mjs — Confirm Big Endian float64 in Parasolid records 
  * and test coordinate extraction with correct endianness.
+ * Clean-room analysis of public-domain NIST test files.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
