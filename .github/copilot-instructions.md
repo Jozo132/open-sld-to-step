@@ -37,7 +37,7 @@ tests/
   step-conversion.test.ts           # ✅ passing (117 tests, needs NIST samples)
 scripts/
   download-nist-samples.mjs         # Downloads NIST MBE PMI test models
-  investigate[1-34].mjs             # Disposable binary exploration scripts
+  investigate[1-43].mjs             # Disposable binary exploration scripts
 wasm/assembly/
   geometry.ts                       # AssemblyScript stub (dot product, normalize, etc.)
 downloads/nist/                     # NIST sample files (not in git)
@@ -77,7 +77,7 @@ output/                             # Generated STEP files (not in git)
 
 ## Where We Left Off — Current State
 
-**All 242 tests pass. The parser now extracts vertices AND surfaces from Parasolid data and generates full BRep STEP output.**
+**All 242 tests pass. The parser extracts vertices, surfaces (planes + cylinders), deduplicates by equation, clusters vertices into face regions, computes convex hull boundaries, and detects cylinder-through-plane holes as inner loops. Output is CLOSED_SHELL ADVANCED_BREP with bounded faces.**
 
 ### Solved problems
 
@@ -85,21 +85,35 @@ output/                             # Generated STEP files (not in git)
 2. **Endianness**: Float64 values are **Big Endian** (network byte order), not Little Endian. Confirmed by √2/2, 1.0, and other geometric constants.
 3. **Markerless records**: Some Parasolid editions (same schema version!) have NO `=p`/`=q` record markers at all. Fix: fallback to full-buffer BE float64 triplet scanning when no markers are found. Of 11 NIST files, 4 use `=p`/`=q` markers and 7 do not.
 4. **Sub-record separator**: Geometry entities (0x1E/0x1F) are always sub-records within sentinel blocks, separated by `00 01 00 01 00 03`. The `extractAllEntities()` method splits blocks accordingly.
-5. **Surface classification**: 7-float entities after 0x2B marker → plane (origin+normal+0), 11-float → cylinder/cone (origin+axis+refdir+radius+semiAngle). Verified: CTC_01 yields 214 planes + 68 cylinders.
-6. **Synthetic BRep topology**: Each surface gets a face with an empty edge loop, bundled into an OPEN_SHELL and MANIFOLD_SOLID_BREP. This produces valid ADVANCED_BREP_SHAPE_REPRESENTATION STEP output.
+5. **Surface classification**: 7-float entities after 0x2B marker → plane (origin+normal+0), 11-float → cylinder/cone (origin+axis+refdir+radius+semiAngle). Raw extraction: 214 planes + 68 cylinders for CTC_01.
+6. **Unit conversion**: PS meters × 1000 → STEP mm. Applied to vertex positions, surface origins, and cylinder/cone radii.
+7. **Surface deduplication**: Planes grouped by normal+distance, cylinders by axis+radius → 214 raw planes → 55 unique, 68 raw cylinders → 42 unique for CTC_01.
+8. **Vertex-surface association**: Each surface gets its nearby vertices (perpendicular distance < 0.5mm for planes, radial distance from cylinder ≈ radius ± 0.5mm).
+9. **LINE vs PLANE filtering**: 7-float entities include both PLANEs and LINE curves. LINEs are filtered out by requiring ≥ 3 associated vertices for a face. Effectively: 55 unique planes → faces with ≥ 3 vertices.
+10. **Bounded face topology**: Convex hull of associated vertices on each plane → LINE edges forming the face boundary. Cylinders get circle+seam edges. CLOSED_SHELL instead of OPEN_SHELL.
+11. **Vertex spatial clustering**: Vertices on the same plane equation are clustered by 2D proximity (60mm threshold) to create separate faces for spatially separated surface patches.
+12. **Inner loops (holes)**: Cylinders whose axes are roughly parallel to a plane's normal and project inside the face's convex hull create circle inner loops (FACE_BOUND). CTC_01 now has 15 inner loop holes across 5 faces.
 
-### Future improvements
+### Current output quality (CTC_01 vs reference)
 
-- **Unit conversion**: ✅ Implemented. PS meters × 1000 → STEP mm. Applied to vertex positions, surface origins, and cylinder/cone radii.
-- **Edge/loop topology**: Faces currently have empty edge loops. Real topology requires extracting face→loop→edge→vertex reference chains from the binary data. Sub-record separator works for geometry but NOT for topology entities (only 1 face found vs 139 expected).
-- **Plane vs line discrimination**: 7-float entities include both PLANEs and LINE curves (indistinguishable by structure alone). Needs context from topology references or perpendicular-distance heuristics.
-- **Cone detection**: 11-float entities with non-zero semiAngle are cones — implemented but untested (no cones in the tested files).
-- **B-spline surfaces**: Entities with 9, 10, 13+ floats are skipped. These likely include B-spline surfaces and tori.
-- **Schema-driven parsing**: The current approach classifies by float count. A proper implementation would parse the schema section, map class IDs to field layouts, and decode each entity record structurally.
+| Entity | Ours | Reference |
+|--------|------|-----------|
+| PLANE | 55 | 80 |
+| CYLINDRICAL_SURFACE | 42 | 57 |
+| EDGE_LOOP | 92 | 174 |
+| ADVANCED_FACE | 77 | 139 |
+| FACE_BOUND (inner) | 15 | 57 |
+| CLOSED_SHELL | 1 | 1 |
+| MANIFOLD_SOLID_BREP | 1 | 1 |
 
-### Files that are solid (do not need changes for basic operation)
+### Known remaining issues
 
-- All source files are complete and tested — 242/242 tests pass
+- **Convex hull fills concavities**: The top face boundary is a convex polygon. The reference has a concave dog-bone profile. Without edge topology, the convex hull is the best available boundary approximation.
+- **Missing surfaces**: 55 planes vs 80 reference, 42 cylinders vs 57. Some surfaces are lost in deduplication (tolerance too aggressive) or not extracted (B-spline, cone types).
+- **Missing topology**: Cannot extract actual face→loop→edge→vertex chains from binary data. Topology entities are embedded inline in type-0x11 records, not as separate sub-record entities.
+- **Cone detection**: 11-float entities with non-zero semiAngle → implemented but 0 found for CTC_01.
+- **B-spline surfaces**: Entities with 9, 10, 13+ floats are skipped.
+- **Schema-driven parsing**: The current approach classifies by float count. A proper implementation would parse the schema section.
 
 ## Parasolid Binary Transmit Format Notes
 

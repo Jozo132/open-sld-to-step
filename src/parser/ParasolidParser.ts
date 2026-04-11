@@ -837,14 +837,77 @@ export class ParasolidParser {
     }
 
     /**
+     * Cluster 2D points into groups by spatial proximity using connected
+     * components. Two points are in the same cluster if they are within
+     * `threshold` distance (directly or transitively through other points).
+     * @internal
+     */
+    private static clusterPoints2D(
+        pts: Array<{ u: number; v: number; idx: number }>,
+        threshold: number,
+    ): Array<Array<{ u: number; v: number; idx: number }>> {
+        const n = pts.length;
+        const assigned = new Int32Array(n).fill(-1);
+        let nextCluster = 0;
+        const threshSq = threshold * threshold;
+
+        for (let i = 0; i < n; i++) {
+            if (assigned[i] >= 0) continue;
+            const cluster = nextCluster++;
+            const queue = [i];
+            assigned[i] = cluster;
+            while (queue.length > 0) {
+                const ci = queue.shift()!;
+                const cu = pts[ci].u, cv = pts[ci].v;
+                for (let j = 0; j < n; j++) {
+                    if (assigned[j] >= 0) continue;
+                    const du = cu - pts[j].u, dv = cv - pts[j].v;
+                    if (du * du + dv * dv <= threshSq) {
+                        assigned[j] = cluster;
+                        queue.push(j);
+                    }
+                }
+            }
+        }
+
+        const clusters: Array<Array<{ u: number; v: number; idx: number }>> = [];
+        for (let c = 0; c < nextCluster; c++) {
+            clusters.push(pts.filter((_, i) => assigned[i] === c));
+        }
+        return clusters;
+    }
+
+    /**
+     * Test whether a 2D point (pu, pv) is inside a convex polygon (CCW order).
+     * Uses the cross-product sign test: inside if left of every edge.
+     * @internal
+     */
+    private static isPointInConvexHull(
+        hull: Array<{ u: number; v: number }>,
+        pu: number,
+        pv: number,
+    ): boolean {
+        for (let i = 0; i < hull.length; i++) {
+            const a = hull[i];
+            const b = hull[(i + 1) % hull.length];
+            // cross product (edge direction) × (point − edge start)
+            const cross = (b.u - a.u) * (pv - a.v) - (b.v - a.v) * (pu - a.u);
+            if (cross < -1e-6) return false;
+        }
+        return true;
+    }
+
+    /**
      * Build face topology with proper edge loop boundaries derived from
      * vertex positions associated with each surface.
      *
-     * For planes: vertices are projected to 2D, a convex hull is computed,
-     * and the hull polygon becomes the face boundary (LINE edges).
+     * For planes:
+     *  - Vertices are projected to 2D and clustered by spatial proximity
+     *  - Each cluster gets its own face with a convex hull outer boundary
+     *  - Cylinders whose axes pass through the face create inner loops (holes)
      *
-     * For cylinders: vertices are projected to (height, angle), and two
-     * CIRCLE edges at min/max height + two LINE seam edges form the boundary.
+     * For cylinders:
+     *  - Two CIRCLE edges (top/bottom) + two LINE seam edges bound the face
      *
      * @internal
      */
@@ -871,35 +934,48 @@ export class ParasolidParser {
         let nextCurveId = 1;
         let nextExtraVtxId = vertices.length + 1;
 
+        // Separate surface types for cross-referencing
+        const cylSurfaces = surfaces.filter(
+            s => s.surfaceType === 'cylinder' || s.surfaceType === 'cone',
+        );
+
+        // ──── Build plane faces ─────────────────────────────────────────
         for (const surf of surfaces) {
+            if (surf.surfaceType !== 'plane') continue;
+
             const assocIndices = vertexSurfaceMap.get(surf.id) ?? [];
-            // Require at least 3 associated vertices for a meaningful face
             if (assocIndices.length < 3) continue;
 
             const p = surf.params as Record<string, unknown>;
+            const origin = p.origin as PsPoint;
+            const normal = p.normal as PsPoint;
+            const { uAxis, vAxis } = ParasolidParser.planeBasis(normal);
 
-            if (surf.surfaceType === 'plane') {
-                const origin = p.origin as PsPoint;
-                const normal = p.normal as PsPoint;
-                const { uAxis, vAxis } = ParasolidParser.planeBasis(normal);
+            // Project vertices to 2D
+            const pts2D = assocIndices.map(i => {
+                const v = vertices[i].position;
+                const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                return {
+                    u: dx * uAxis.x + dy * uAxis.y + dz * uAxis.z,
+                    v: dx * vAxis.x + dy * vAxis.y + dz * vAxis.z,
+                    idx: i,
+                };
+            });
 
-                // Project vertices to 2D
-                const pts2D = assocIndices.map(i => {
-                    const v = vertices[i].position;
-                    const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
-                    return {
-                        u: dx * uAxis.x + dy * uAxis.y + dz * uAxis.z,
-                        v: dx * vAxis.x + dy * vAxis.y + dz * vAxis.z,
-                        idx: i,
-                    };
-                });
+            // Cluster vertices by spatial proximity.
+            // Threshold 60mm separates most feature regions while keeping
+            // vertices on the same face together for typical machined parts.
+            const clusters = ParasolidParser.clusterPoints2D(pts2D, 60);
 
-                const hull = ParasolidParser.convexHull2D(pts2D);
+            for (const cluster of clusters) {
+                if (cluster.length < 3) continue;
+
+                const hull = ParasolidParser.convexHull2D(cluster);
                 if (hull.length < 3) continue;
 
-                // Create LINE edges along the hull polygon
-                const loopEdges: number[] = [];
-                const loopSenses: boolean[] = [];
+                // Create outer loop from hull polygon
+                const outerLoopEdges: number[] = [];
+                const outerLoopSenses: boolean[] = [];
 
                 for (let hi = 0; hi < hull.length; hi++) {
                     const startIdx = hull[hi].idx;
@@ -923,135 +999,200 @@ export class ParasolidParser {
                         sense: true,
                     });
 
-                    loopEdges.push(edgeId);
-                    loopSenses.push(true);
+                    outerLoopEdges.push(edgeId);
+                    outerLoopSenses.push(true);
                 }
 
-                const loopId = nextLoopId++;
-                loops.push({ id: loopId, edges: loopEdges, senses: loopSenses });
+                const outerLoopId = nextLoopId++;
+                loops.push({ id: outerLoopId, edges: outerLoopEdges, senses: outerLoopSenses });
+
+                // ── Detect cylinder holes (inner loops) ─────────────────
+                const innerLoopIds: number[] = [];
+
+                for (const cyl of cylSurfaces) {
+                    const cp = cyl.params as Record<string, unknown>;
+                    const cylAxis = cp.axis as PsPoint;
+                    const cylOrigin = cp.origin as PsPoint;
+                    const cylRadius = cp.radius as number;
+
+                    // Axis must be roughly parallel to plane normal
+                    const dot = cylAxis.x * normal.x + cylAxis.y * normal.y + cylAxis.z * normal.z;
+                    if (Math.abs(Math.abs(dot) - 1) > 0.1) continue;
+
+                    // Project cylinder origin onto the plane
+                    const dx = cylOrigin.x - origin.x;
+                    const dy = cylOrigin.y - origin.y;
+                    const dz = cylOrigin.z - origin.z;
+                    const distToPlane = dx * normal.x + dy * normal.y + dz * normal.z;
+                    const projX = cylOrigin.x - distToPlane * normal.x;
+                    const projY = cylOrigin.y - distToPlane * normal.y;
+                    const projZ = cylOrigin.z - distToPlane * normal.z;
+
+                    // Convert projection to 2D hull space
+                    const pdx = projX - origin.x, pdy = projY - origin.y, pdz = projZ - origin.z;
+                    const pu = pdx * uAxis.x + pdy * uAxis.y + pdz * uAxis.z;
+                    const pv = pdx * vAxis.x + pdy * vAxis.y + pdz * vAxis.z;
+
+                    // Check if cylinder center projection falls inside this face
+                    if (!ParasolidParser.isPointInConvexHull(hull, pu, pv)) continue;
+
+                    // Create circle inner loop at the intersection
+                    const circleCenter: PsPoint = { x: projX, y: projY, z: projZ };
+                    const seamPt: PsPoint = {
+                        x: circleCenter.x + cylRadius * uAxis.x,
+                        y: circleCenter.y + cylRadius * uAxis.y,
+                        z: circleCenter.z + cylRadius * uAxis.z,
+                    };
+                    const seamVtxId = nextExtraVtxId++;
+                    extraVertices.push({ id: seamVtxId, position: seamPt });
+
+                    const circleCurveId = nextCurveId++;
+                    curves.push({
+                        id: circleCurveId,
+                        curveType: 'circle',
+                        params: { center: circleCenter, normal, radius: cylRadius },
+                    });
+
+                    const circleEdgeId = nextEdgeId++;
+                    edges.push({
+                        id: circleEdgeId,
+                        startVertex: seamVtxId,
+                        endVertex: seamVtxId, // closed circle
+                        curve: circleCurveId,
+                        sense: true,
+                    });
+
+                    const innerLoopId = nextLoopId++;
+                    loops.push({ id: innerLoopId, edges: [circleEdgeId], senses: [true] });
+                    innerLoopIds.push(innerLoopId);
+                }
 
                 const faceId = nextFaceId++;
                 faces.push({
                     id: faceId,
                     surface: surf.id,
-                    outerLoop: loopId,
-                    innerLoops: [],
-                    sense: true,
-                });
-            } else if (surf.surfaceType === 'cylinder') {
-                const origin = p.origin as PsPoint;
-                const axis = p.axis as PsPoint;
-                const radius = p.radius as number;
-                const { uAxis, vAxis } = ParasolidParser.planeBasis(axis);
-
-                // Project vertices along axis to find height extent
-                const heights: number[] = [];
-                for (const i of assocIndices) {
-                    const v = vertices[i].position;
-                    const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
-                    heights.push(dx * axis.x + dy * axis.y + dz * axis.z);
-                }
-                const hMin = Math.min(...heights);
-                const hMax = Math.max(...heights);
-                if (Math.abs(hMax - hMin) < 0.01) continue; // degenerate
-
-                // Create 4 boundary points (2 on top circle, 2 on bottom circle)
-                // Place seam at the U-axis direction
-                const bottomCenter: PsPoint = {
-                    x: origin.x + hMin * axis.x,
-                    y: origin.y + hMin * axis.y,
-                    z: origin.z + hMin * axis.z,
-                };
-                const topCenter: PsPoint = {
-                    x: origin.x + hMax * axis.x,
-                    y: origin.y + hMax * axis.y,
-                    z: origin.z + hMax * axis.z,
-                };
-
-                // Seam point on each circle (at uAxis direction)
-                const botSeam: PsPoint = {
-                    x: bottomCenter.x + radius * uAxis.x,
-                    y: bottomCenter.y + radius * uAxis.y,
-                    z: bottomCenter.z + radius * uAxis.z,
-                };
-                const topSeam: PsPoint = {
-                    x: topCenter.x + radius * uAxis.x,
-                    y: topCenter.y + radius * uAxis.y,
-                    z: topCenter.z + radius * uAxis.z,
-                };
-
-                // Create 2 extra vertices for the seam points
-                const botVtxId = nextExtraVtxId++;
-                const topVtxId = nextExtraVtxId++;
-                extraVertices.push({ id: botVtxId, position: botSeam });
-                extraVertices.push({ id: topVtxId, position: topSeam });
-
-                // Bottom circle curve
-                const botCircleCurveId = nextCurveId++;
-                curves.push({
-                    id: botCircleCurveId,
-                    curveType: 'circle',
-                    params: { center: bottomCenter, normal: axis, radius },
-                });
-                // Top circle curve
-                const topCircleCurveId = nextCurveId++;
-                curves.push({
-                    id: topCircleCurveId,
-                    curveType: 'circle',
-                    params: { center: topCenter, normal: axis, radius },
-                });
-                // Left seam line (bottom → top)
-                const seamLine1Id = nextCurveId++;
-                curves.push({
-                    id: seamLine1Id,
-                    curveType: 'line',
-                    params: { start: botSeam, end: topSeam },
-                });
-
-                // Edges: bottom circle (botSeam→botSeam), seam up, top circle, seam down
-                const botCircleEdgeId = nextEdgeId++;
-                edges.push({
-                    id: botCircleEdgeId,
-                    startVertex: botVtxId,
-                    endVertex: botVtxId,  // closed circle
-                    curve: botCircleCurveId,
-                    sense: true,
-                });
-                const seamUpEdgeId = nextEdgeId++;
-                edges.push({
-                    id: seamUpEdgeId,
-                    startVertex: botVtxId,
-                    endVertex: topVtxId,
-                    curve: seamLine1Id,
-                    sense: true,
-                });
-                const topCircleEdgeId = nextEdgeId++;
-                edges.push({
-                    id: topCircleEdgeId,
-                    startVertex: topVtxId,
-                    endVertex: topVtxId,  // closed circle
-                    curve: topCircleCurveId,
-                    sense: true,
-                });
-
-                // Edge loop: bottom circle → seam up → top circle (reversed) → seam down (reversed)
-                const loopId = nextLoopId++;
-                loops.push({
-                    id: loopId,
-                    edges: [botCircleEdgeId, seamUpEdgeId, topCircleEdgeId, seamUpEdgeId],
-                    senses: [true, true, false, false],
-                });
-
-                const faceId = nextFaceId++;
-                faces.push({
-                    id: faceId,
-                    surface: surf.id,
-                    outerLoop: loopId,
-                    innerLoops: [],
+                    outerLoop: outerLoopId,
+                    innerLoops: innerLoopIds,
                     sense: true,
                 });
             }
-            // cones, spheres, etc. — skip for now
+        }
+
+        // ──── Build cylinder faces ──────────────────────────────────────
+        for (const surf of surfaces) {
+            if (surf.surfaceType !== 'cylinder') continue;
+
+            const assocIndices = vertexSurfaceMap.get(surf.id) ?? [];
+            if (assocIndices.length < 2) continue;
+
+            const p = surf.params as Record<string, unknown>;
+            const origin = p.origin as PsPoint;
+            const axis = p.axis as PsPoint;
+            const radius = p.radius as number;
+            const { uAxis } = ParasolidParser.planeBasis(axis);
+
+            // Project vertices along axis to find height extent
+            const heights: number[] = [];
+            for (const i of assocIndices) {
+                const v = vertices[i].position;
+                const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                heights.push(dx * axis.x + dy * axis.y + dz * axis.z);
+            }
+            const hMin = Math.min(...heights);
+            const hMax = Math.max(...heights);
+            if (Math.abs(hMax - hMin) < 0.01) continue;
+
+            const bottomCenter: PsPoint = {
+                x: origin.x + hMin * axis.x,
+                y: origin.y + hMin * axis.y,
+                z: origin.z + hMin * axis.z,
+            };
+            const topCenter: PsPoint = {
+                x: origin.x + hMax * axis.x,
+                y: origin.y + hMax * axis.y,
+                z: origin.z + hMax * axis.z,
+            };
+
+            // Seam points at uAxis direction
+            const botSeam: PsPoint = {
+                x: bottomCenter.x + radius * uAxis.x,
+                y: bottomCenter.y + radius * uAxis.y,
+                z: bottomCenter.z + radius * uAxis.z,
+            };
+            const topSeam: PsPoint = {
+                x: topCenter.x + radius * uAxis.x,
+                y: topCenter.y + radius * uAxis.y,
+                z: topCenter.z + radius * uAxis.z,
+            };
+
+            const botVtxId = nextExtraVtxId++;
+            const topVtxId = nextExtraVtxId++;
+            extraVertices.push({ id: botVtxId, position: botSeam });
+            extraVertices.push({ id: topVtxId, position: topSeam });
+
+            // Bottom and top circle curves
+            const botCircleCurveId = nextCurveId++;
+            curves.push({
+                id: botCircleCurveId,
+                curveType: 'circle',
+                params: { center: bottomCenter, normal: axis, radius },
+            });
+            const topCircleCurveId = nextCurveId++;
+            curves.push({
+                id: topCircleCurveId,
+                curveType: 'circle',
+                params: { center: topCenter, normal: axis, radius },
+            });
+            // Seam line
+            const seamLineId = nextCurveId++;
+            curves.push({
+                id: seamLineId,
+                curveType: 'line',
+                params: { start: botSeam, end: topSeam },
+            });
+
+            // Edges
+            const botCircleEdgeId = nextEdgeId++;
+            edges.push({
+                id: botCircleEdgeId,
+                startVertex: botVtxId,
+                endVertex: botVtxId,
+                curve: botCircleCurveId,
+                sense: true,
+            });
+            const seamUpEdgeId = nextEdgeId++;
+            edges.push({
+                id: seamUpEdgeId,
+                startVertex: botVtxId,
+                endVertex: topVtxId,
+                curve: seamLineId,
+                sense: true,
+            });
+            const topCircleEdgeId = nextEdgeId++;
+            edges.push({
+                id: topCircleEdgeId,
+                startVertex: topVtxId,
+                endVertex: topVtxId,
+                curve: topCircleCurveId,
+                sense: true,
+            });
+
+            // Loop: bottom circle → seam up → top circle (rev) → seam down (rev)
+            const loopId = nextLoopId++;
+            loops.push({
+                id: loopId,
+                edges: [botCircleEdgeId, seamUpEdgeId, topCircleEdgeId, seamUpEdgeId],
+                senses: [true, true, false, false],
+            });
+
+            const faceId = nextFaceId++;
+            faces.push({
+                id: faceId,
+                surface: surf.id,
+                outerLoop: loopId,
+                innerLoops: [],
+                sense: true,
+            });
         }
 
         return { faces, loops, edges, curves, extraVertices };
