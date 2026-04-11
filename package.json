@@ -18,6 +18,8 @@
     "test:integration": "node --max-old-space-size=1024 --experimental-vm-modules ./node_modules/jest/bin/jest.js --testPathPattern=brep-extraction",
     "lint": "tsc --noEmit",
     "convert": "npm run build && node scripts/convert-all.mjs",
+    "compare": "node scripts/compare-step.mjs",
+    "compare-all": "node scripts/compare-all.mjs",
     "download-samples": "node scripts/download-nist-samples.mjs"
   },
   "keywords": [

@@ -962,10 +962,20 @@ export class ParasolidParser {
                 };
             });
 
-            // Cluster vertices by spatial proximity.
-            // Threshold 60mm separates most feature regions while keeping
-            // vertices on the same face together for typical machined parts.
-            const clusters = ParasolidParser.clusterPoints2D(pts2D, 60);
+            // Adaptive clustering threshold: use the bounding box diagonal
+            // of all 2D-projected vertices to scale the threshold.
+            // Large faces (big bbox) get a large threshold so perimeter
+            // vertices stay in one cluster.  Small features keep ~60 mm.
+            let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+            for (const p2 of pts2D) {
+                if (p2.u < uMin) uMin = p2.u;
+                if (p2.u > uMax) uMax = p2.u;
+                if (p2.v < vMin) vMin = p2.v;
+                if (p2.v > vMax) vMax = p2.v;
+            }
+            const bboxDiag = Math.sqrt((uMax - uMin) ** 2 + (vMax - vMin) ** 2);
+            const clusterThreshold = Math.max(60, bboxDiag / 3);
+            const clusters = ParasolidParser.clusterPoints2D(pts2D, clusterThreshold);
 
             for (const cluster of clusters) {
                 if (cluster.length < 3) continue;
