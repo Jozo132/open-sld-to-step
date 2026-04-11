@@ -78,7 +78,12 @@ function resolveDirection(entities, id) {
     if (!e.types.includes('DIRECTION')) return null;
     const m = e.args.match(/\(\s*([^)]+)\s*\)/);
     if (!m) return null;
-    return parseNumberTuple(m[1]);
+    const v = parseNumberTuple(m[1]);
+    if (!v) return null;
+    // Normalize — some STEP files store non-unit direction vectors
+    const len = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+    if (len < 1e-15) return v;
+    return [v[0]/len, v[1]/len, v[2]/len];
 }
 
 function resolveAxis2Placement(entities, id) {
@@ -380,6 +385,93 @@ export const SCORE_WEIGHTS = {
 };
 
 /**
+ * Detect the length unit of a STEP file.
+ * Returns a scale factor to convert to mm.
+ */
+function detectLengthUnitScale(text) {
+    // Check for CONVERSION_BASED_UNIT with INCH
+    if (/CONVERSION_BASED_UNIT\s*\(\s*'INCH'/i.test(text)) return 25.4;
+    // Check for SI_UNIT with MILLI METRE (mm)
+    if (/SI_UNIT\s*\(\s*\.MILLI\.\s*,\s*\.METRE\.\s*\)/i.test(text)) return 1.0;
+    // Check for SI_UNIT with just METRE (no prefix = meters)
+    if (/SI_UNIT\s*\(\s*\$\s*,\s*\.METRE\.\s*\)/i.test(text)) return 1000.0;
+    // Default: assume mm
+    return 1.0;
+}
+
+/** Scale all geometry values (positions, radii) by a factor. */
+function scaleGeometry(geom, factor) {
+    if (factor === 1.0) return geom;
+    const sp = (pt) => pt ? pt.map(v => v * factor) : pt;
+    return {
+        planes: geom.planes.map(p => ({
+            ...p,
+            origin: sp(p.origin),
+            d: p.d * factor,
+        })),
+        cylinders: geom.cylinders.map(c => ({
+            ...c,
+            origin: sp(c.origin),
+            radius: c.radius * factor,
+        })),
+        cones: geom.cones.map(c => ({
+            ...c,
+            origin: sp(c.origin),
+            radius: c.radius * factor,
+        })),
+        spheres: geom.spheres.map(s => ({
+            ...s,
+            origin: sp(s.origin),
+            radius: s.radius * factor,
+        })),
+        toroids: geom.toroids.map(t => ({
+            ...t,
+            origin: sp(t.origin),
+            majorR: t.majorR * factor,
+            minorR: t.minorR * factor,
+        })),
+        bsplineSurfaces: geom.bsplineSurfaces,
+        circles: geom.circles.map(c => ({
+            ...c,
+            origin: sp(c.origin),
+            radius: c.radius * factor,
+        })),
+        lines: geom.lines.map(l => ({
+            ...l,
+            origin: sp(l.origin),
+        })),
+    };
+}
+
+/** Scale face geometry by a factor. */
+function scaleFaces(faces, factor) {
+    if (factor === 1.0) return faces;
+    const sp = (pt) => pt ? pt.map(v => v * factor) : pt;
+    return faces.map(f => {
+        const nf = { ...f };
+        if (f.surfGeom) {
+            const sg = { ...f.surfGeom };
+            if (sg.origin) sg.origin = sg.origin.map(v => v * factor);
+            if (sg.d !== undefined) sg.d *= factor;
+            if (sg.radius !== undefined) sg.radius *= factor;
+            nf.surfGeom = sg;
+        }
+        if (f.centroid) nf.centroid = sp(f.centroid);
+        if (f.bboxDiag !== undefined) nf.bboxDiag = f.bboxDiag * factor;
+        return nf;
+    });
+}
+
+/** Scale vertex positions by a factor. */
+function scaleVertices(verts, factor) {
+    if (factor === 1.0) return verts;
+    return verts.map(v => ({
+        ...v,
+        coords: v.coords.map(c => c * factor),
+    }));
+}
+
+/**
  * Compare two STEP files and return structured results + printable output.
  * @param {string} genText  - Generated STEP file content
  * @param {string} refText  - Reference STEP file content
@@ -444,8 +536,15 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
 
     // ──── 2. Geometric Surface Matching ─────────────────────────────────────
     log('\n─── 2. GEOMETRIC SURFACE 1:1 MATCHING ─────────────────────────');
-    const genGeom = extractGeometry(genEntities);
-    const refGeom = extractGeometry(refEntities);
+    const genScale = detectLengthUnitScale(genText);
+    const refScale = detectLengthUnitScale(refText);
+    // Normalize both to mm
+    let genGeom = extractGeometry(genEntities);
+    let refGeom = extractGeometry(refEntities);
+    if (genScale !== 1.0) genGeom = scaleGeometry(genGeom, genScale);
+    if (refScale !== 1.0) refGeom = scaleGeometry(refGeom, refScale);
+    log(`  Units: generated=${genScale === 1 ? 'mm' : genScale === 25.4 ? 'in' : genScale + 'x'}  reference=${refScale === 1 ? 'mm' : refScale === 25.4 ? 'in' : refScale + 'x'}`);
+
 
     function reportMatch(label, genArr, refArr, distFn, maxDist) {
         const result = greedyMatch(genArr, refArr, distFn, maxDist);
@@ -483,8 +582,10 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
 
     // ──── 3. ADVANCED_FACE Matching ─────────────────────────────────────────
     log('\n─── 3. ADVANCED_FACE 1:1 MATCHING ─────────────────────────────');
-    const genFaces = extractFaces(genEntities);
-    const refFaces = extractFaces(refEntities);
+    let genFaces = extractFaces(genEntities);
+    let refFaces = extractFaces(refEntities);
+    if (genScale !== 1.0) genFaces = scaleFaces(genFaces, genScale);
+    if (refScale !== 1.0) refFaces = scaleFaces(refFaces, refScale);
     const faceResult = greedyMatch(genFaces, refFaces, faceDist, 200);
     const faceTotal = Math.max(genFaces.length, refFaces.length);
     const faceMatchPct = faceTotal > 0 ? (faceResult.matched.length / faceTotal * 100).toFixed(1) : '100.0';
@@ -533,8 +634,10 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
 
     // ──── 4. Vertex Position Matching ───────────────────────────────────────
     log('\n─── 4. VERTEX POSITION 1:1 MATCHING ───────────────────────────');
-    const genVerts = extractVertexPoints(genEntities);
-    const refVerts = extractVertexPoints(refEntities);
+    let genVerts = extractVertexPoints(genEntities);
+    let refVerts = extractVertexPoints(refEntities);
+    if (genScale !== 1.0) genVerts = genVerts.map(v => ({ ...v, position: v.position.map(c => c * genScale) }));
+    if (refScale !== 1.0) refVerts = refVerts.map(v => ({ ...v, position: v.position.map(c => c * refScale) }));
     const vtxResult = greedyMatch(genVerts, refVerts, (a, b) => dist3(a.position, b.position), 1.0);
     const vtxTotal = Math.max(genVerts.length, refVerts.length);
     const vtxMatchPct = vtxTotal > 0 ? (vtxResult.matched.length / vtxTotal * 100).toFixed(1) : '100.0';

@@ -204,8 +204,10 @@ export class ParasolidToStepMapper {
         return this.addEntity('CARTESIAN_POINT', `'${label}',(${f(x)},${f(y)},${f(z)})`)
     }
 
-    /** Emit a DIRECTION entity. */
+    /** Emit a DIRECTION entity. Normalizes to unit length for STEP compliance. */
     private addDirection(label: string, x: number, y: number, z: number): number {
+        const mag = Math.sqrt(x * x + y * y + z * z);
+        if (mag > 1e-15) { x /= mag; y /= mag; z /= mag; }
         const f = ParasolidToStepMapper.fmtFloat;
         return this.addEntity('DIRECTION', `'${label}',(${f(x)},${f(y)},${f(z)})`);
     }

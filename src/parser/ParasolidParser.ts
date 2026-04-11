@@ -544,52 +544,51 @@ export class ParasolidParser {
     }
 
     /**
-     * Extract and classify surface/curve geometry from entity records.
+     * Read float64 BE values after a geometry marker (0x2B or 0x2D) in data.
+     * Returns null if no marker found or too few floats.
+     * @internal
+     */
+    private static readGeomFloats(data: Buffer): { floats: number[]; marker: number } | null {
+        // Try both 0x2B ('+') and 0x2D ('-') markers
+        for (const marker of [0x2b, 0x2d]) {
+            const markerIdx = data.indexOf(marker);
+            if (markerIdx < 0 || markerIdx + 1 + 8 > data.length) continue;
+            const floats: number[] = [];
+            for (let off = markerIdx + 1; off + 8 <= data.length; off += 8) {
+                const val = data.readDoubleBE(off);
+                if (!isFinite(val) || Math.abs(val) > 1e6) break;
+                floats.push(val);
+            }
+            if (floats.length >= 3) return { floats, marker };
+        }
+        return null;
+    }
+
+    /**
+     * Extract cylinder/cone surfaces from type-0x1F (SURFACE/BSPLINE) entities.
+     * These are the reliably identifiable surfaces from the binary stream.
      *
-     * Geometry entities (type 0x1E and 0x1F) are always sub-records inside
-     * sentinel blocks. Each contains a 0x2B marker byte followed by
-     * consecutive float64 BE values encoding the geometry parameters.
+     * Also extracts candidate plane surfaces from type-0x1E entities that
+     * have 7 floats and a unit-length direction vector. These will be
+     * validated later by vertex association (≥3 coplanar vertices → plane).
      *
-     * Classification by float count after the 0x2B marker:
-     *  - 7 floats  →  plane: origin(3) + normal(3) + 0
-     *  - 11 floats →  cylinder (semiAngle≈0) or cone:
-     *                  origin(3) + axis(3) + refdir(3) + radius + semiAngle
-     *  - Other     →  unknown (B-spline, torus, etc.)
-     *
-     * Coordinates are stored in Parasolid native units (meters) and passed
-     * through as-is. The caller is responsible for unit conversion if needed.
+     * Checks both 0x2B and 0x2D geometry markers.
      *
      * @internal
      */
     private extractSurfaces(): PsSurface[] {
         const allEntities = this.extractAllEntities();
-        const geomEntities = allEntities.filter(
-            e => e.type === ENTITY_SURFACE || e.type === ENTITY_BSPLINE,
-        );
-
         const surfaces: PsSurface[] = [];
         let nextId = 1;
 
-        for (const ent of geomEntities) {
-            const data = ent.data;
+        // ── Type 0x1F entities → cylinders, cones ───────────────────────
+        const surfEntities = allEntities.filter(e => e.type === ENTITY_BSPLINE);
+        for (const ent of surfEntities) {
+            const result = ParasolidParser.readGeomFloats(ent.data);
+            if (!result || result.floats.length < 11) continue;
+            const floats = result.floats;
 
-            // Find the 0x2B marker that precedes float data
-            const markerIdx = data.indexOf(0x2b);
-            if (markerIdx < 0 || markerIdx + 1 + 8 > data.length) continue;
-
-            // Read consecutive valid float64 BE values after the marker
-            const floatStart = markerIdx + 1;
-            const floats: number[] = [];
-            for (let off = floatStart; off + 8 <= data.length; off += 8) {
-                const val = data.readDoubleBE(off);
-                if (!isFinite(val) || Math.abs(val) > 1e6) break;
-                floats.push(val);
-            }
-
-            if (floats.length < 7) continue;
-
-            if (floats.length === 11 || floats.length === 12) {
-                // Cylinder or cone: origin(3) + axis(3) + refdir(3) + radius + semiAngle
+            if (floats.length >= 11) {
                 const origin: PsPoint = { x: floats[0], y: floats[1], z: floats[2] };
                 const axis: PsPoint = { x: floats[3], y: floats[4], z: floats[5] };
                 const radius = floats[9];
@@ -617,16 +616,32 @@ export class ParasolidParser {
                         params: { origin: sOrigin, axis, radius: sRadius, halfAngle: semiAngle },
                     });
                 }
-            } else if (floats.length === 7 || floats.length === 8) {
-                // Plane candidate: origin(3) + normal(3) + 0
+            }
+        }
+
+        // ── Type 0x1E entities → candidate planes (7/8 floats) ──────────
+        // These are MIXED line curves and plane surfaces. We classify
+        // them as candidate planes here; the caller validates via vertex
+        // association (≥3 coplanar vertices → real plane).
+        const curveEntities = allEntities.filter(e => e.type === ENTITY_SURFACE);
+        for (const ent of curveEntities) {
+            const result = ParasolidParser.readGeomFloats(ent.data);
+            if (!result) continue;
+            const floats = result.floats;
+
+            if (floats.length === 7 || floats.length === 8) {
                 const origin: PsPoint = { x: floats[0], y: floats[1], z: floats[2] };
                 const normal: PsPoint = { x: floats[3], y: floats[4], z: floats[5] };
 
-                // Validate the normal is approximately unit length
+                // Validate unit-length normal (tight tolerance)
                 const mag = Math.sqrt(
                     normal.x * normal.x + normal.y * normal.y + normal.z * normal.z,
                 );
-                if (mag < 0.5 || mag > 2.0) continue;
+                if (mag < 0.9 || mag > 1.1) continue;
+                // Normalize
+                normal.x /= mag;
+                normal.y /= mag;
+                normal.z /= mag;
 
                 surfaces.push({
                     id: nextId++,
@@ -640,11 +655,210 @@ export class ParasolidParser {
                         normal,
                     },
                 });
+            } else if (floats.length >= 11) {
+                // Some curve entities (type 0x1E) are actually cylinders
+                const origin: PsPoint = { x: floats[0], y: floats[1], z: floats[2] };
+                const axis: PsPoint = { x: floats[3], y: floats[4], z: floats[5] };
+                const radius = floats[9];
+                const semiAngle = floats[10];
+                if (radius <= 0 || radius > 1e4) continue;
+                const axisMag = Math.sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+                if (axisMag < 0.5) continue;
+
+                const sOrigin: PsPoint = {
+                    x: origin.x * PS_TO_MM,
+                    y: origin.y * PS_TO_MM,
+                    z: origin.z * PS_TO_MM,
+                };
+                const sRadius = radius * PS_TO_MM;
+
+                if (Math.abs(semiAngle) < 1e-6) {
+                    surfaces.push({
+                        id: nextId++,
+                        surfaceType: 'cylinder',
+                        params: { origin: sOrigin, axis: { x: axis.x / axisMag, y: axis.y / axisMag, z: axis.z / axisMag }, radius: sRadius },
+                    });
+                } else {
+                    surfaces.push({
+                        id: nextId++,
+                        surfaceType: 'cone',
+                        params: { origin: sOrigin, axis: { x: axis.x / axisMag, y: axis.y / axisMag, z: axis.z / axisMag }, radius: sRadius, halfAngle: semiAngle },
+                    });
+                }
             }
-            // Other float counts (9, 10, 13+) → skip for now (B-spline, torus, etc.)
         }
 
         return surfaces;
+    }
+
+    /**
+     * Infer plane surfaces from vertex positions by scanning for coplanar
+     * clusters along a bank of candidate normal directions.
+     *
+     * This finds planes that are NOT present as explicit geometry entities
+     * in the binary stream (e.g., axis-aligned faces, chamfer planes).
+     *
+     * Algorithm:
+     *  1. Build a bank of candidate normal directions:
+     *     - 6 axis-aligned (±X, ±Y, ±Z)
+     *     - 12 diagonal normals at 45°
+     *     - Additional normals at 30°/60° manufacturing angles
+     *     - Direction vectors from extracted type-0x1E entities
+     *  2. For each normal, project all vertices onto it
+     *  3. Cluster projected values within tolerance
+     *  4. Clusters with ≥3 vertices (axis-aligned) or ≥4 (other) → inferred plane
+     *
+     * @internal
+     */
+    private inferPlanesFromVertices(
+        vertices: PsVertex[],
+        existingSurfaces: PsSurface[],
+    ): PsSurface[] {
+        if (vertices.length < 3) return [];
+
+        // Axis-aligned normals (low false-positive rate)
+        const axisNormals: PsPoint[] = [
+            { x: 1, y: 0, z: 0 },
+            { x: 0, y: 1, z: 0 },
+            { x: 0, y: 0, z: 1 },
+        ];
+
+        // Extracted normals from validated type-0x1E planes
+        // (known directions from the binary data → find more planes at same angles)
+        const extractedNormals: PsPoint[] = [];
+        for (const surf of existingSurfaces) {
+            if (surf.surfaceType !== 'plane') continue;
+            const p = surf.params as { normal: PsPoint };
+            const n = p.normal;
+            // Skip if axis-aligned (already covered)
+            if ((Math.abs(n.x) > 0.99) || (Math.abs(n.y) > 0.99) || (Math.abs(n.z) > 0.99)) continue;
+            // Deduplicate
+            let isDup = false;
+            for (const en of extractedNormals) {
+                const dot = Math.abs(en.x * n.x + en.y * n.y + en.z * n.z);
+                if (dot > 0.999) { isDup = true; break; }
+            }
+            if (!isDup) extractedNormals.push({ x: n.x, y: n.y, z: n.z });
+        }
+
+        // For each unique normal, project vertices and cluster
+        const PLANE_INFER_TOL = 0.1; // mm — tight tolerance for inferred planes
+        const inferred: PsSurface[] = [];
+        let nextId = existingSurfaces.length + 1000;
+
+        // Precompute existing plane equations for dedup checking
+        const existingPlaneEqs: Array<{ normal: PsPoint; d: number }> = [];
+        for (const surf of existingSurfaces) {
+            if (surf.surfaceType !== 'plane') continue;
+            const sp = surf.params as { origin: PsPoint; normal: PsPoint };
+            existingPlaneEqs.push({
+                normal: sp.normal,
+                d: sp.origin.x * sp.normal.x + sp.origin.y * sp.normal.y + sp.origin.z * sp.normal.z,
+            });
+        }
+
+        // Combine both normal sets with their respective minimum vertex thresholds
+        const allNormals: Array<{ normal: PsPoint; minVerts: number }> = [
+            ...axisNormals.map(n => ({ normal: n, minVerts: 3 })),
+            ...extractedNormals.map(n => ({ normal: n, minVerts: 5 })),
+        ];
+
+        for (const { normal, minVerts } of allNormals) {
+            const projections: Array<{ d: number; idx: number }> = [];
+            for (let i = 0; i < vertices.length; i++) {
+                const v = vertices[i].position;
+                projections.push({
+                    d: v.x * normal.x + v.y * normal.y + v.z * normal.z,
+                    idx: i,
+                });
+            }
+            projections.sort((a, b) => a.d - b.d);
+
+            let ci = 0;
+            while (ci < projections.length) {
+                const clusterStart = ci;
+                const d0 = projections[ci].d;
+                while (ci < projections.length && projections[ci].d - d0 < PLANE_INFER_TOL) ci++;
+
+                const clusterSize = ci - clusterStart;
+                if (clusterSize < minVerts) continue;
+
+                // Verify these vertices span a 2D area (not collinear).
+                // Compute bounding box in the two perpendicular directions.
+                const { uAxis: infU, vAxis: infV } = ParasolidParser.planeBasis(normal);
+                let uMinI = Infinity, uMaxI = -Infinity, vMinI = Infinity, vMaxI = -Infinity;
+                for (let j = clusterStart; j < ci; j++) {
+                    const v = vertices[projections[j].idx].position;
+                    const pu = v.x * infU.x + v.y * infU.y + v.z * infU.z;
+                    const pv = v.x * infV.x + v.y * infV.y + v.z * infV.z;
+                    if (pu < uMinI) uMinI = pu;
+                    if (pu > uMaxI) uMaxI = pu;
+                    if (pv < vMinI) vMinI = pv;
+                    if (pv > vMaxI) vMaxI = pv;
+                }
+                const uSpan = uMaxI - uMinI;
+                const vSpan = vMaxI - vMinI;
+                // Skip if vertices don't span at least 1mm in both directions
+                if (uSpan < 1.0 || vSpan < 1.0) continue;
+
+                let dSum = 0;
+                for (let j = clusterStart; j < ci; j++) dSum += projections[j].d;
+                const dAvg = dSum / clusterSize;
+
+                // Check existing surfaces
+                let alreadyExists = false;
+                for (const eq of existingPlaneEqs) {
+                    const dot = Math.abs(
+                        eq.normal.x * normal.x + eq.normal.y * normal.y + eq.normal.z * normal.z,
+                    );
+                    if (dot < 0.99) continue;
+                    const sign = (eq.normal.x * normal.x + eq.normal.y * normal.y + eq.normal.z * normal.z) > 0 ? 1 : -1;
+                    if (Math.abs(dAvg - sign * eq.d) < 1.0) {
+                        alreadyExists = true;
+                        break;
+                    }
+                }
+                if (alreadyExists) continue;
+
+                // Check already-inferred
+                let alreadyInferred = false;
+                for (const inf of inferred) {
+                    const ip = inf.params as { origin: PsPoint; normal: PsPoint };
+                    const dot = Math.abs(
+                        ip.normal.x * normal.x + ip.normal.y * normal.y + ip.normal.z * normal.z,
+                    );
+                    if (dot < 0.99) continue;
+                    const infD = ip.origin.x * ip.normal.x + ip.origin.y * ip.normal.y + ip.origin.z * ip.normal.z;
+                    const sign = (ip.normal.x * normal.x + ip.normal.y * normal.y + ip.normal.z * normal.z) > 0 ? 1 : -1;
+                    if (Math.abs(dAvg - sign * infD) < 1.0) {
+                        alreadyInferred = true;
+                        break;
+                    }
+                }
+                if (alreadyInferred) continue;
+
+                // Use positive normal direction
+                const planeNormal: PsPoint = dAvg >= 0
+                    ? { x: normal.x, y: normal.y, z: normal.z }
+                    : { x: -normal.x, y: -normal.y, z: -normal.z };
+                const planeD = Math.abs(dAvg);
+
+                inferred.push({
+                    id: nextId++,
+                    surfaceType: 'plane',
+                    params: {
+                        origin: {
+                            x: planeNormal.x * planeD,
+                            y: planeNormal.y * planeD,
+                            z: planeNormal.z * planeD,
+                        },
+                        normal: planeNormal,
+                    },
+                });
+            }
+        }
+
+        return inferred;
     }
 
     // ── Surface deduplication ────────────────────────────────────────────────
@@ -744,7 +958,7 @@ export class ParasolidParser {
                     const dist = Math.abs(dx * normal.x + dy * normal.y + dz * normal.z);
                     if (dist < ParasolidParser.VERTEX_PLANE_TOL) indices.push(i);
                 }
-            } else if (surf.surfaceType === 'cylinder' || surf.surfaceType === 'cone') {
+            } else if (surf.surfaceType === 'cylinder') {
                 const origin = p.origin as PsPoint;
                 const axis = p.axis as PsPoint;
                 const radius = p.radius as number;
@@ -755,6 +969,22 @@ export class ParasolidParser {
                     const px = dx - along * axis.x, py = dy - along * axis.y, pz = dz - along * axis.z;
                     const radDist = Math.sqrt(px * px + py * py + pz * pz);
                     if (Math.abs(radDist - radius) < ParasolidParser.VERTEX_CYL_TOL) indices.push(i);
+                }
+            } else if (surf.surfaceType === 'cone') {
+                const origin = p.origin as PsPoint;
+                const axis = p.axis as PsPoint;
+                const radius = p.radius as number;
+                const halfAngle = (p.halfAngle as number) ?? 0;
+                const tanHA = Math.tan(halfAngle);
+                for (let i = 0; i < vertices.length; i++) {
+                    const v = vertices[i].position;
+                    const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                    const along = dx * axis.x + dy * axis.y + dz * axis.z;
+                    const expectedR = radius + along * tanHA;
+                    if (expectedR < 0) continue;
+                    const px = dx - along * axis.x, py = dy - along * axis.y, pz = dz - along * axis.z;
+                    const radDist = Math.sqrt(px * px + py * py + pz * pz);
+                    if (Math.abs(radDist - expectedR) < ParasolidParser.VERTEX_CYL_TOL) indices.push(i);
                 }
             }
 
@@ -898,6 +1128,28 @@ export class ParasolidParser {
     }
 
     /**
+     * Test whether a 2D point is inside an arbitrary simple polygon.
+     * Uses the ray-casting (even-odd) algorithm.
+     * @internal
+     */
+    private static isPointInPolygon(
+        poly: Array<{ u: number; v: number }>,
+        pu: number,
+        pv: number,
+    ): boolean {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const ui = poly[i].u, vi = poly[i].v;
+            const uj = poly[j].u, vj = poly[j].v;
+            if ((vi > pv) !== (vj > pv) &&
+                pu < (uj - ui) * (pv - vi) / (vj - vi) + ui) {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+
+    /**
      * Build face topology with proper edge loop boundaries derived from
      * vertex positions associated with each surface.
      *
@@ -980,16 +1232,24 @@ export class ParasolidParser {
             for (const cluster of clusters) {
                 if (cluster.length < 3) continue;
 
-                const hull = ParasolidParser.convexHull2D(cluster);
-                if (hull.length < 3) continue;
+                // Sort ALL cluster vertices by angle from centroid for a
+                // closed polygon.  This gives a more representative centroid
+                // than convex-hull-only vertices (which shifts outward for
+                // concave shapes).
+                const cu = cluster.reduce((s, p) => s + p.u, 0) / cluster.length;
+                const cv = cluster.reduce((s, p) => s + p.v, 0) / cluster.length;
+                const sorted = cluster.slice().sort((a, b) => {
+                    return Math.atan2(a.v - cv, a.u - cu) - Math.atan2(b.v - cv, b.u - cu);
+                });
+                if (sorted.length < 3) continue;
 
-                // Create outer loop from hull polygon
+                // Create outer loop from angle-sorted polygon
                 const outerLoopEdges: number[] = [];
                 const outerLoopSenses: boolean[] = [];
 
-                for (let hi = 0; hi < hull.length; hi++) {
-                    const startIdx = hull[hi].idx;
-                    const endIdx = hull[(hi + 1) % hull.length].idx;
+                for (let hi = 0; hi < sorted.length; hi++) {
+                    const startIdx = sorted[hi].idx;
+                    const endIdx = sorted[(hi + 1) % sorted.length].idx;
                     const sv = vertices[startIdx];
                     const ev = vertices[endIdx];
 
@@ -1016,6 +1276,9 @@ export class ParasolidParser {
                 const outerLoopId = nextLoopId++;
                 loops.push({ id: outerLoopId, edges: outerLoopEdges, senses: outerLoopSenses });
 
+                // Convex hull for hole-in-face detection (isPointInConvexHull)
+                const hull = ParasolidParser.convexHull2D(cluster);
+
                 // ── Detect cylinder holes (inner loops) ─────────────────
                 const innerLoopIds: number[] = [];
 
@@ -1029,11 +1292,32 @@ export class ParasolidParser {
                     const dot = cylAxis.x * normal.x + cylAxis.y * normal.y + cylAxis.z * normal.z;
                     if (Math.abs(Math.abs(dot) - 1) > 0.1) continue;
 
+                    // Check cylinder actually passes through this plane:
+                    // compute the axial extent of the cylinder from its vertices
+                    // and verify the plane falls within that extent.
+                    const cylVtxIndices = vertexSurfaceMap.get(cyl.id) ?? [];
+                    if (cylVtxIndices.length === 0) continue;
+
+                    let minAlong = Infinity, maxAlong = -Infinity;
+                    for (const vi of cylVtxIndices) {
+                        const v = vertices[vi].position;
+                        const adx = v.x - cylOrigin.x, ady = v.y - cylOrigin.y, adz = v.z - cylOrigin.z;
+                        const along = adx * cylAxis.x + ady * cylAxis.y + adz * cylAxis.z;
+                        if (along < minAlong) minAlong = along;
+                        if (along > maxAlong) maxAlong = along;
+                    }
+
                     // Project cylinder origin onto the plane
                     const dx = cylOrigin.x - origin.x;
                     const dy = cylOrigin.y - origin.y;
                     const dz = cylOrigin.z - origin.z;
                     const distToPlane = dx * normal.x + dy * normal.y + dz * normal.z;
+
+                    // Distance from cylinder origin to plane, measured along cylinder axis
+                    const planeAlongAxis = -distToPlane / dot;
+                    const AXIAL_TOL = 2.0; // mm
+                    if (planeAlongAxis < minAlong - AXIAL_TOL || planeAlongAxis > maxAlong + AXIAL_TOL) continue;
+
                     const projX = cylOrigin.x - distToPlane * normal.x;
                     const projY = cylOrigin.y - distToPlane * normal.y;
                     const projZ = cylOrigin.z - distToPlane * normal.z;
@@ -1043,8 +1327,9 @@ export class ParasolidParser {
                     const pu = pdx * uAxis.x + pdy * uAxis.y + pdz * uAxis.z;
                     const pv = pdx * vAxis.x + pdy * vAxis.y + pdz * vAxis.z;
 
-                    // Check if cylinder center projection falls inside this face
-                    if (!ParasolidParser.isPointInConvexHull(hull, pu, pv)) continue;
+                    // Check if cylinder center projection falls inside this face's
+                    // actual boundary (angular-sorted polygon, not convex hull)
+                    if (!ParasolidParser.isPointInPolygon(sorted, pu, pv)) continue;
 
                     // Create circle inner loop at the intersection
                     const circleCenter: PsPoint = { x: projX, y: projY, z: projZ };
@@ -1099,7 +1384,7 @@ export class ParasolidParser {
             const origin = p.origin as PsPoint;
             const axis = p.axis as PsPoint;
             const radius = p.radius as number;
-            const { uAxis } = ParasolidParser.planeBasis(axis);
+            const { uAxis, vAxis } = ParasolidParser.planeBasis(axis);
 
             // Project vertices along axis to find height extent
             const heights: number[] = [];
@@ -1123,77 +1408,236 @@ export class ParasolidParser {
                 z: origin.z + hMax * axis.z,
             };
 
-            // Seam points at uAxis direction
-            const botSeam: PsPoint = {
-                x: bottomCenter.x + radius * uAxis.x,
-                y: bottomCenter.y + radius * uAxis.y,
-                z: bottomCenter.z + radius * uAxis.z,
-            };
-            const topSeam: PsPoint = {
-                x: topCenter.x + radius * uAxis.x,
-                y: topCenter.y + radius * uAxis.y,
-                z: topCenter.z + radius * uAxis.z,
-            };
+            // Use actual associated vertices sorted by angle around the
+            // cylinder axis for the outer loop.  This gives a representative
+            // centroid (close to axis midpoint) instead of the biased seam
+            // centroid that is offset by radius.
+            const cylPts = assocIndices.map(i => {
+                const v = vertices[i].position;
+                const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                const u = dx * uAxis.x + dy * uAxis.y + dz * uAxis.z;
+                const w = dx * vAxis.x + dy * vAxis.y + dz * vAxis.z;
+                return { idx: i, angle: Math.atan2(w, u) };
+            });
+            cylPts.sort((a, b) => a.angle - b.angle);
 
-            const botVtxId = nextExtraVtxId++;
-            const topVtxId = nextExtraVtxId++;
-            extraVertices.push({ id: botVtxId, position: botSeam });
-            extraVertices.push({ id: topVtxId, position: topSeam });
+            // Build edge loop through all associated vertices
+            const outerLoopEdges: number[] = [];
+            const outerLoopSenses: boolean[] = [];
 
-            // Bottom and top circle curves
-            const botCircleCurveId = nextCurveId++;
+            if (cylPts.length >= 3) {
+                for (let ci = 0; ci < cylPts.length; ci++) {
+                    const startIdx = cylPts[ci].idx;
+                    const endIdx = cylPts[(ci + 1) % cylPts.length].idx;
+                    const sv = vertices[startIdx];
+                    const ev = vertices[endIdx];
+
+                    const curveId = nextCurveId++;
+                    curves.push({
+                        id: curveId,
+                        curveType: 'line',
+                        params: { start: sv.position, end: ev.position },
+                    });
+
+                    const edgeId = nextEdgeId++;
+                    edges.push({
+                        id: edgeId,
+                        startVertex: sv.id,
+                        endVertex: ev.id,
+                        curve: curveId,
+                        sense: true,
+                    });
+
+                    outerLoopEdges.push(edgeId);
+                    outerLoopSenses.push(true);
+                }
+            } else {
+                // Fallback: synthetic seam for ≤2 associated vertices
+                const botSeam: PsPoint = {
+                    x: bottomCenter.x + radius * uAxis.x,
+                    y: bottomCenter.y + radius * uAxis.y,
+                    z: bottomCenter.z + radius * uAxis.z,
+                };
+                const topSeam: PsPoint = {
+                    x: topCenter.x + radius * uAxis.x,
+                    y: topCenter.y + radius * uAxis.y,
+                    z: topCenter.z + radius * uAxis.z,
+                };
+                const botVtxId = nextExtraVtxId++;
+                const topVtxId = nextExtraVtxId++;
+                extraVertices.push({ id: botVtxId, position: botSeam });
+                extraVertices.push({ id: topVtxId, position: topSeam });
+
+                const botCircleCurveId = nextCurveId++;
+                curves.push({ id: botCircleCurveId, curveType: 'circle', params: { center: bottomCenter, normal: axis, radius } });
+                const topCircleCurveId = nextCurveId++;
+                curves.push({ id: topCircleCurveId, curveType: 'circle', params: { center: topCenter, normal: axis, radius } });
+                const seamLineId = nextCurveId++;
+                curves.push({ id: seamLineId, curveType: 'line', params: { start: botSeam, end: topSeam } });
+
+                const botCircleEdgeId = nextEdgeId++;
+                edges.push({ id: botCircleEdgeId, startVertex: botVtxId, endVertex: botVtxId, curve: botCircleCurveId, sense: true });
+                const seamUpEdgeId = nextEdgeId++;
+                edges.push({ id: seamUpEdgeId, startVertex: botVtxId, endVertex: topVtxId, curve: seamLineId, sense: true });
+                const topCircleEdgeId = nextEdgeId++;
+                edges.push({ id: topCircleEdgeId, startVertex: topVtxId, endVertex: topVtxId, curve: topCircleCurveId, sense: true });
+
+                outerLoopEdges.push(botCircleEdgeId, seamUpEdgeId, topCircleEdgeId, seamUpEdgeId);
+                outerLoopSenses.push(true, true, false, false);
+            }
+
+            // Add circle curves for CIRCLE entity matching
+            const botCircleCurveIdForCircle = nextCurveId++;
             curves.push({
-                id: botCircleCurveId,
+                id: botCircleCurveIdForCircle,
                 curveType: 'circle',
                 params: { center: bottomCenter, normal: axis, radius },
             });
-            const topCircleCurveId = nextCurveId++;
+            const topCircleCurveIdForCircle = nextCurveId++;
             curves.push({
-                id: topCircleCurveId,
+                id: topCircleCurveIdForCircle,
                 curveType: 'circle',
                 params: { center: topCenter, normal: axis, radius },
             });
-            // Seam line
-            const seamLineId = nextCurveId++;
-            curves.push({
-                id: seamLineId,
-                curveType: 'line',
-                params: { start: botSeam, end: topSeam },
-            });
 
-            // Edges
-            const botCircleEdgeId = nextEdgeId++;
-            edges.push({
-                id: botCircleEdgeId,
-                startVertex: botVtxId,
-                endVertex: botVtxId,
-                curve: botCircleCurveId,
-                sense: true,
-            });
-            const seamUpEdgeId = nextEdgeId++;
-            edges.push({
-                id: seamUpEdgeId,
-                startVertex: botVtxId,
-                endVertex: topVtxId,
-                curve: seamLineId,
-                sense: true,
-            });
-            const topCircleEdgeId = nextEdgeId++;
-            edges.push({
-                id: topCircleEdgeId,
-                startVertex: topVtxId,
-                endVertex: topVtxId,
-                curve: topCircleCurveId,
-                sense: true,
-            });
-
-            // Loop: bottom circle → seam up → top circle (rev) → seam down (rev)
             const loopId = nextLoopId++;
             loops.push({
                 id: loopId,
-                edges: [botCircleEdgeId, seamUpEdgeId, topCircleEdgeId, seamUpEdgeId],
-                senses: [true, true, false, false],
+                edges: outerLoopEdges,
+                senses: outerLoopSenses,
             });
+
+            const faceId = nextFaceId++;
+            faces.push({
+                id: faceId,
+                surface: surf.id,
+                outerLoop: loopId,
+                innerLoops: [],
+                sense: true,
+            });
+        }
+
+        // ──── Build cone faces ──────────────────────────────────────────
+        for (const surf of surfaces) {
+            if (surf.surfaceType !== 'cone') continue;
+
+            const assocIndices = vertexSurfaceMap.get(surf.id) ?? [];
+            if (assocIndices.length < 2) continue;
+
+            const p = surf.params as Record<string, unknown>;
+            const origin = p.origin as PsPoint;
+            const axis = p.axis as PsPoint;
+            const radius = p.radius as number;
+            const halfAngle = (p.halfAngle as number) ?? 0;
+            const tanHA = Math.tan(halfAngle);
+            const { uAxis, vAxis } = ParasolidParser.planeBasis(axis);
+
+            // Project vertices along axis to find height extent
+            const heights: number[] = [];
+            for (const i of assocIndices) {
+                const v = vertices[i].position;
+                const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                heights.push(dx * axis.x + dy * axis.y + dz * axis.z);
+            }
+            const hMin = Math.min(...heights);
+            const hMax = Math.max(...heights);
+            if (Math.abs(hMax - hMin) < 0.01) continue;
+
+            const bottomCenter: PsPoint = {
+                x: origin.x + hMin * axis.x,
+                y: origin.y + hMin * axis.y,
+                z: origin.z + hMin * axis.z,
+            };
+            const topCenter: PsPoint = {
+                x: origin.x + hMax * axis.x,
+                y: origin.y + hMax * axis.y,
+                z: origin.z + hMax * axis.z,
+            };
+            const botRadius = Math.max(0, radius + hMin * tanHA);
+            const topRadius = Math.max(0, radius + hMax * tanHA);
+
+            // Use actual vertices sorted by angle for accurate centroid
+            const conePts = assocIndices.map(i => {
+                const v = vertices[i].position;
+                const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                const u = dx * uAxis.x + dy * uAxis.y + dz * uAxis.z;
+                const w = dx * vAxis.x + dy * vAxis.y + dz * vAxis.z;
+                return { idx: i, angle: Math.atan2(w, u) };
+            });
+            conePts.sort((a, b) => a.angle - b.angle);
+
+            const outerLoopEdges: number[] = [];
+            const outerLoopSenses: boolean[] = [];
+
+            if (conePts.length >= 3) {
+                for (let ci = 0; ci < conePts.length; ci++) {
+                    const startIdx = conePts[ci].idx;
+                    const endIdx = conePts[(ci + 1) % conePts.length].idx;
+                    const sv = vertices[startIdx];
+                    const ev = vertices[endIdx];
+
+                    const curveId = nextCurveId++;
+                    curves.push({
+                        id: curveId,
+                        curveType: 'line',
+                        params: { start: sv.position, end: ev.position },
+                    });
+
+                    const edgeId = nextEdgeId++;
+                    edges.push({
+                        id: edgeId,
+                        startVertex: sv.id,
+                        endVertex: ev.id,
+                        curve: curveId,
+                        sense: true,
+                    });
+
+                    outerLoopEdges.push(edgeId);
+                    outerLoopSenses.push(true);
+                }
+            } else {
+                // Fallback for 2 vertices
+                const botSeam: PsPoint = {
+                    x: bottomCenter.x + botRadius * uAxis.x,
+                    y: bottomCenter.y + botRadius * uAxis.y,
+                    z: bottomCenter.z + botRadius * uAxis.z,
+                };
+                const topSeam: PsPoint = {
+                    x: topCenter.x + topRadius * uAxis.x,
+                    y: topCenter.y + topRadius * uAxis.y,
+                    z: topCenter.z + topRadius * uAxis.z,
+                };
+                const botVtxId = nextExtraVtxId++;
+                const topVtxId = nextExtraVtxId++;
+                extraVertices.push({ id: botVtxId, position: botSeam });
+                extraVertices.push({ id: topVtxId, position: topSeam });
+
+                const botCircleCurveId = nextCurveId++;
+                curves.push({ id: botCircleCurveId, curveType: 'circle', params: { center: bottomCenter, normal: axis, radius: botRadius } });
+                const topCircleCurveId = nextCurveId++;
+                curves.push({ id: topCircleCurveId, curveType: 'circle', params: { center: topCenter, normal: axis, radius: topRadius } });
+                const seamLineId = nextCurveId++;
+                curves.push({ id: seamLineId, curveType: 'line', params: { start: botSeam, end: topSeam } });
+
+                const botEdgeId = nextEdgeId++;
+                edges.push({ id: botEdgeId, startVertex: botVtxId, endVertex: botVtxId, curve: botCircleCurveId, sense: true });
+                const seamEdgeId = nextEdgeId++;
+                edges.push({ id: seamEdgeId, startVertex: botVtxId, endVertex: topVtxId, curve: seamLineId, sense: true });
+                const topEdgeId = nextEdgeId++;
+                edges.push({ id: topEdgeId, startVertex: topVtxId, endVertex: topVtxId, curve: topCircleCurveId, sense: true });
+
+                outerLoopEdges.push(botEdgeId, seamEdgeId, topEdgeId, seamEdgeId);
+                outerLoopSenses.push(true, true, false, false);
+            }
+
+            // Circle curves for matching
+            const botCircleCurveIdC = nextCurveId++;
+            curves.push({ id: botCircleCurveIdC, curveType: 'circle', params: { center: bottomCenter, normal: axis, radius: botRadius } });
+            const topCircleCurveIdC = nextCurveId++;
+            curves.push({ id: topCircleCurveIdC, curveType: 'circle', params: { center: topCenter, normal: axis, radius: topRadius } });
+
+            const loopId = nextLoopId++;
+            loops.push({ id: loopId, edges: outerLoopEdges, senses: outerLoopSenses });
 
             const faceId = nextFaceId++;
             faces.push({
@@ -1259,9 +1703,36 @@ export class ParasolidParser {
             },
         }));
 
-        // ── Surface extraction and deduplication ─────────────────────────
-        const rawSurfaces = this.extractSurfaces();
-        const surfaces = this.deduplicateSurfaces(rawSurfaces);
+        // ── Step 1: Extract surfaces from binary geometry entities ──────
+        const extractedSurfaces = this.extractSurfaces();
+
+        // ── Step 2: Validate candidate planes from type-0x1E entities ───
+        // Only keep planes with ≥3 coplanar vertices (filters out LINE curves)
+        const validatedSurfaces: PsSurface[] = [];
+        for (const surf of extractedSurfaces) {
+            if (surf.surfaceType === 'plane') {
+                const p = surf.params as { origin: PsPoint; normal: PsPoint };
+                let coplanarCount = 0;
+                for (const v of vertices) {
+                    const dx = v.position.x - p.origin.x;
+                    const dy = v.position.y - p.origin.y;
+                    const dz = v.position.z - p.origin.z;
+                    const dist = Math.abs(dx * p.normal.x + dy * p.normal.y + dz * p.normal.z);
+                    if (dist < ParasolidParser.VERTEX_PLANE_TOL) coplanarCount++;
+                    if (coplanarCount >= 3) break; // early exit
+                }
+                if (coplanarCount >= 3) validatedSurfaces.push(surf);
+            } else {
+                validatedSurfaces.push(surf); // cylinders, cones → keep
+            }
+        }
+
+        // ── Step 3: Infer additional planes from vertex positions ───────
+        const inferredPlanes = this.inferPlanesFromVertices(vertices, validatedSurfaces);
+
+        // ── Step 4: Merge and deduplicate ───────────────────────────────
+        const mergedSurfaces = [...validatedSurfaces, ...inferredPlanes];
+        const surfaces = this.deduplicateSurfaces(mergedSurfaces);
 
         // Re-number deduplicated surfaces sequentially
         surfaces.forEach((s, i) => { s.id = i + 1; });
