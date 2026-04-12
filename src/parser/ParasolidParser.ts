@@ -292,6 +292,28 @@ export interface PsPackedGeometryLikeRecord {
     markerByte: number;
 }
 
+/** Alias view used when an edge points at refIds[1] of a unique geometry-like record. */
+export interface PsGeometryLikeAliasRecord {
+    /** Byte offset of the canonical geometry-like record. */
+    offset: number;
+    /** Raw record type byte from the canonical geometry-like record. */
+    type: number;
+    /** Alias id carried by the referencing edge. */
+    id: number;
+    /** Canonical geometry-like record id that owns the decoded payload. */
+    canonicalId: number;
+    /** Raw flags field copied from the canonical geometry-like record. */
+    flags: number;
+    /** Packed trailer if the canonical record is FF-format; null for compact records. */
+    trailer: number | null;
+    /** Four observed uint16 refs from the canonical geometry-like record. */
+    refIds: [number, number, number, number];
+    /** Marker byte that begins the float payload. */
+    markerByte: number;
+}
+
+type PsDirectGeometryLikeRecord = PsCompactGeometryLikeRecord | PsPackedGeometryLikeRecord;
+
 /** Decoded type-29 point record found in the post-sentinel gap. */
 export interface PsGapPointRecord {
     /** Byte offset of the preceding sentinel. */
@@ -848,9 +870,29 @@ export class ParasolidParser {
         return records;
     }
 
+    /** Decode conservative aliases for edge targets that point at refIds[1] of a unique record. */
+    parseGeometryLikeAliasRecords(): PsGeometryLikeAliasRecord[] {
+        return this.buildGeometryLikeAliases(this.parseDirectGeometryLikeRecords());
+    }
+
     /** Merge compact and packed geometry-like records for edge-link resolution. */
-    parseAllGeometryLikeRecords(): Array<PsCompactGeometryLikeRecord | PsPackedGeometryLikeRecord> {
-        const records = new Map<number, PsCompactGeometryLikeRecord | PsPackedGeometryLikeRecord>();
+    parseAllGeometryLikeRecords(): Array<PsDirectGeometryLikeRecord | PsGeometryLikeAliasRecord> {
+        const direct = this.parseDirectGeometryLikeRecords();
+        const records = new Map<number, PsDirectGeometryLikeRecord | PsGeometryLikeAliasRecord>();
+
+        for (const record of direct) {
+            records.set(record.id, record);
+        }
+        for (const record of this.buildGeometryLikeAliases(direct)) {
+            if (!records.has(record.id)) records.set(record.id, record);
+        }
+
+        return [...records.values()];
+    }
+
+    /** Merge the known direct compact and packed geometry-like record families. @internal */
+    private parseDirectGeometryLikeRecords(): PsDirectGeometryLikeRecord[] {
+        const records = new Map<number, PsDirectGeometryLikeRecord>();
 
         for (const record of this.parseCompactGeometryLikeRecords()) {
             records.set(record.id, record);
@@ -860,6 +902,38 @@ export class ParasolidParser {
         }
 
         return [...records.values()];
+    }
+
+    /** Build alias ids that uniquely reference refIds[1] of a direct geometry-like record. @internal */
+    private buildGeometryLikeAliases(direct: PsDirectGeometryLikeRecord[]): PsGeometryLikeAliasRecord[] {
+        const directIds = new Set(direct.map((record) => record.id));
+        const buckets = new Map<number, PsDirectGeometryLikeRecord[]>();
+
+        for (const record of direct) {
+            const aliasId = record.refIds[1];
+            const bucket = buckets.get(aliasId) ?? [];
+            bucket.push(record);
+            buckets.set(aliasId, bucket);
+        }
+
+        const aliases: PsGeometryLikeAliasRecord[] = [];
+        for (const [aliasId, bucket] of buckets) {
+            if (bucket.length !== 1 || directIds.has(aliasId)) continue;
+
+            const canonical = bucket[0];
+            aliases.push({
+                offset: canonical.offset,
+                type: canonical.type,
+                id: aliasId,
+                canonicalId: canonical.id,
+                flags: canonical.flags,
+                trailer: 'trailer' in canonical ? canonical.trailer : null,
+                refIds: canonical.refIds,
+                markerByte: canonical.markerByte,
+            });
+        }
+
+        return aliases;
     }
 
     /** Decode compact record families that use four leading refs plus a marker. @internal */

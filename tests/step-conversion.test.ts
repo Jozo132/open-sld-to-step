@@ -552,6 +552,34 @@ describe('ParasolidParser', () => {
         expect(extended.get(1836)).toMatchObject({ type: 134, refIds: [1843, 1828, 1844, 1], markerByte: 0x2d });
     });
 
+    it('creates conservative alias records for the no-header geometry-like residue', () => {
+        if (!hasSamples) return;
+
+        const expectations = new Map([
+            ['nist_ctc_01_asme1_rd_sw1802.sldprt', { id: 1195, canonicalId: 1197, type: 38, refIds: [1205, 1195, 1206, 1], markerByte: 0x2d }],
+            ['nist_ctc_02_asme1_rc_sw1802.sldprt', { id: 2960, canonicalId: 2962, type: 38, refIds: [2904, 2960, 2969, 1], markerByte: 0x2b }],
+            ['nist_ctc_05_asme1_rd_sw1802.sldprt', { id: 1252, canonicalId: 1254, type: 31, refIds: [1261, 1252, 1262, 1], markerByte: 0x2b }],
+            ['nist_ftc_07_asme1_rd_sw1802.sldprt', { id: 1857, canonicalId: 1859, type: 30, refIds: [1866, 1857, 1867, 1], markerByte: 0x2d }],
+            ['nist_ftc_10_asme1_rb_sw1802.sldprt', { id: 714, canonicalId: 717, type: 31, refIds: [724, 714, 725, 1], markerByte: 0x2b }],
+        ]);
+
+        for (const filePath of sampleFiles) {
+            const key = basename(filePath).toLowerCase();
+            const expected = expectations.get(key);
+            if (!expected) continue;
+
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const aliases = new Map(parser.parseGeometryLikeAliasRecords().map(record => [record.id, record]));
+
+            expect(aliases.get(expected.id)).toMatchObject(expected);
+        }
+    });
+
     it('decodes packed geometry-like records for unresolved edge targets', () => {
         if (!hasSamples) return;
 
@@ -570,7 +598,7 @@ describe('ParasolidParser', () => {
         }
     });
 
-    it('combines compact and packed geometry-like indices for near-complete edge resolution', () => {
+    it('combines direct and alias geometry-like indices for full edge resolution', () => {
         if (!hasSamples) return;
 
         for (const filePath of sampleFiles) {
@@ -588,10 +616,7 @@ describe('ParasolidParser', () => {
             const combinedResolved = edges.filter(edge => combined.has(edge.geometryLikeId)).length;
 
             expect(combinedResolved).toBeGreaterThanOrEqual(compactResolved);
-            if (basename(filePath).toLowerCase() === 'nist_ftc_07_asme1_rd_sw1802.sldprt') {
-                expect(combinedResolved).toBe(584);
-                continue;
-            }
+            expect(combinedResolved).toBe(edges.length);
         }
     });
 
@@ -611,10 +636,10 @@ describe('ParasolidParser', () => {
         expect(packed.get(774)).toMatchObject({ type: 31, refIds: [764, 765, 775, 1], markerByte: 0x2b, trailer: 1 });
         expect(packed.get(3430)).toMatchObject({ type: 32, refIds: [3433, 3427, 3434, 1], markerByte: 0x2d, trailer: 1 });
         expect(packed.get(10)).toMatchObject({ type: 30, refIds: [44, 45, 1, 1], markerByte: 0x2d, trailer: 1 });
-        expect(edges.filter(edge => combined.has(edge.geometryLikeId)).length).toBe(357);
+        expect(edges.filter(edge => combined.has(edge.geometryLikeId)).length).toBe(358);
     });
 
-    it('raises CTC_05 geometry-like resolution to the packed-augmented ceiling', () => {
+    it('raises CTC_05 geometry-like resolution to the alias-augmented ceiling', () => {
         if (!hasSamples) return;
         const targetPath = sampleFiles.find(filePath =>
             basename(filePath).toLowerCase() === 'nist_ctc_05_asme1_rd_sw1802.sldprt',
@@ -630,7 +655,7 @@ describe('ParasolidParser', () => {
         const combined = new Set(parser.parseAllGeometryLikeRecords().map(record => record.id));
         const edges = parser.parseEdgeRecords();
 
-        expect(edges.filter(edge => combined.has(edge.geometryLikeId)).length).toBe(329);
+        expect(edges.filter(edge => combined.has(edge.geometryLikeId)).length).toBe(330);
     });
 
     it('finds entity classes in a real transmit file', () => {
