@@ -361,6 +361,64 @@ describe('ParasolidParser', () => {
         expect(components[0].orderedEdges.map(record => record.id)).toEqual([49, 53, 57, 62, 65]);
     });
 
+    it('reconstructs ordered type-16 component chains across NIST samples', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const components = parser.parseEdgeComponents();
+            const chains = parser.parseEdgeComponentChains();
+            const totalComponentsInChains = chains.reduce((sum, chain) => sum + chain.orderedComponents.length, 0);
+            const fileName = basename(filePath).toLowerCase();
+
+            expect(totalComponentsInChains).toBe(components.length);
+
+            if (fileName === 'nist_ctc_01_asme1_rd_sw1802.sldprt') {
+                expect(chains).toHaveLength(1);
+                expect(chains[0].orderedComponents).toHaveLength(12);
+                expect(chains[0].terminalPrevId).toBe(13);
+                expect(chains[0].terminalNextId).toBe(1);
+                continue;
+            }
+
+            if (fileName === 'nist_ctc_03_asme1_rc_sw1802.sldprt') {
+                expect(chains).toHaveLength(4);
+                expect(chains.every(chain => chain.orderedComponents.length === 1)).toBe(true);
+                continue;
+            }
+
+            expect(chains).toHaveLength(1);
+            expect(chains[0].orderedComponents).toHaveLength(1);
+        }
+    });
+
+    it('stabilizes the CTC_01 type-16 component chain order', () => {
+        if (!ctc01Path) return;
+
+        const buf = readFileSync(ctc01Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const chains = parser.parseEdgeComponentChains();
+
+        expect(chains).toHaveLength(1);
+        expect(chains[0].headEdgeId).toBe(49);
+        expect(chains[0].tailEdgeId).toBe(57);
+        expect(chains[0].orderedComponents.map(component => component.headEdgeId)).toEqual([
+            49, 1175, 1504, 1524, 1385, 1410, 1724, 1395, 1636, 1750, 1150, 1100,
+        ]);
+        expect(chains[0].orderedComponents.map(component => component.tailEdgeId)).toEqual([
+            1174, 1499, 1328, 1538, 1409, 1731, 1394, 1656, 3514, 1158, 1105, 57,
+        ]);
+    });
+
     it('finds entity classes in a real transmit file', () => {
         if (!hasSamples) return;
         const buf = readFileSync(sampleFiles[0]);

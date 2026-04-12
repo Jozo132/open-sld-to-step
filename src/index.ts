@@ -52,6 +52,7 @@ export type {
     PsGapPointRecord,
     PsEdgeRecord,
     PsEdgeComponent,
+    PsEdgeComponentChain,
 } from './parser/ParasolidParser.js';
 
 // STEP mapper

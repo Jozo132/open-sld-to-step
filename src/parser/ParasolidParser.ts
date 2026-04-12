@@ -241,6 +241,20 @@ export interface PsEdgeComponent {
     orderedEdges: PsEdgeRecord[];
 }
 
+/** Ordered chain of type-16 components linked by external anchor ids. */
+export interface PsEdgeComponentChain {
+    /** Head edge id of the first component in the chain. */
+    headEdgeId: number;
+    /** Tail edge id of the last component in the chain. */
+    tailEdgeId: number;
+    /** External predecessor anchor for the first component. */
+    terminalPrevId: number;
+    /** External successor anchor for the last component. */
+    terminalNextId: number;
+    /** Components in observed linked order. */
+    orderedComponents: PsEdgeComponent[];
+}
+
 /** Decoded type-29 point record found in the post-sentinel gap. */
 export interface PsGapPointRecord {
     /** Byte offset of the preceding sentinel. */
@@ -683,6 +697,65 @@ export class ParasolidParser {
         }
 
         return components;
+    }
+
+    /** Recover ordered chains of type-16 components linked by anchor ids. */
+    parseEdgeComponentChains(): PsEdgeComponentChain[] {
+        const components = this.parseEdgeComponents();
+        if (components.length === 0) return [];
+
+        const prevCounts = new Map<number, number>();
+        const nextCounts = new Map<number, number>();
+        for (const component of components) {
+            prevCounts.set(component.terminalPrevId, (prevCounts.get(component.terminalPrevId) ?? 0) + 1);
+            nextCounts.set(component.terminalNextId, (nextCounts.get(component.terminalNextId) ?? 0) + 1);
+        }
+
+        const byPrevId = new Map<number, PsEdgeComponent>();
+        const byNextId = new Map<number, PsEdgeComponent>();
+        for (const component of components) {
+            if (prevCounts.get(component.terminalPrevId) === 1) {
+                byPrevId.set(component.terminalPrevId, component);
+            }
+            if (nextCounts.get(component.terminalNextId) === 1) {
+                byNextId.set(component.terminalNextId, component);
+            }
+        }
+
+        const chains: PsEdgeComponentChain[] = [];
+        const seen = new Set<number>();
+        const starts = components.filter((component) => !byNextId.has(component.terminalPrevId));
+
+        const walkChain = (start: PsEdgeComponent): void => {
+            const orderedComponents: PsEdgeComponent[] = [];
+            let current: PsEdgeComponent | undefined = start;
+
+            while (current && !seen.has(current.headEdgeId)) {
+                orderedComponents.push(current);
+                seen.add(current.headEdgeId);
+                current = byPrevId.get(current.terminalNextId);
+            }
+
+            if (orderedComponents.length === 0) return;
+            const tail = orderedComponents[orderedComponents.length - 1];
+            chains.push({
+                headEdgeId: start.headEdgeId,
+                tailEdgeId: tail.tailEdgeId,
+                terminalPrevId: start.terminalPrevId,
+                terminalNextId: tail.terminalNextId,
+                orderedComponents,
+            });
+        };
+
+        for (const start of starts) {
+            if (!seen.has(start.headEdgeId)) walkChain(start);
+        }
+
+        for (const component of components) {
+            if (!seen.has(component.headEdgeId)) walkChain(component);
+        }
+
+        return chains;
     }
 
     /** Decode type-29 gap point records that immediately follow sentinels. */
