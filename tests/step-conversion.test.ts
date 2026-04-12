@@ -236,6 +236,56 @@ describe('ParasolidParser', () => {
         ]);
     });
 
+    it('reconstructs a single ordered coedge chain across NIST samples', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const coedges = parser.parseCoedgeRecords();
+            const chain = parser.parseCoedgeChain();
+
+            if (basename(filePath).toLowerCase() === 'nist_ftc_11_asme1_rb_sw1802.sldprt') {
+                expect(chain).toBeNull();
+                continue;
+            }
+
+            expect(chain).not.toBeNull();
+            if (!chain) continue;
+
+            expect(chain.orderedCoedges).toHaveLength(coedges.length);
+            expect(chain.headCoedgeId).toBe(chain.orderedCoedges[0].id);
+            expect(chain.tailCoedgeId).toBe(chain.orderedCoedges[chain.orderedCoedges.length - 1].id);
+            expect(chain.terminalNextId).toBe(1);
+        }
+    });
+
+    it('stabilizes the CTC_01 coedge chain endpoints', () => {
+        if (!ctc01Path) return;
+
+        const buf = readFileSync(ctc01Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const chain = parser.parseCoedgeChain();
+
+        expect(chain).not.toBeNull();
+        if (!chain) return;
+
+        expect(chain.headCoedgeId).toBe(52);
+        expect(chain.tailCoedgeId).toBe(710);
+        expect(chain.terminalPrevId).toBe(14);
+        expect(chain.terminalNextId).toBe(1);
+        expect(chain.orderedCoedges.slice(0, 4).map(record => record.id)).toEqual([52, 60, 68, 73]);
+        expect(chain.orderedCoedges.slice(-4).map(record => record.id)).toEqual([701, 704, 707, 710]);
+    });
+
     it('finds entity classes in a real transmit file', () => {
         if (!hasSamples) return;
         const buf = readFileSync(sampleFiles[0]);

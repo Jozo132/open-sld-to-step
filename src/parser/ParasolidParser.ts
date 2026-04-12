@@ -191,6 +191,20 @@ export interface PsCoedgeRecord {
     vertexPointId: number;
 }
 
+/** Ordered global coedge chain recovered from compact type-18 records. */
+export interface PsCoedgeChain {
+    /** Coedge id whose previous link leaves the decoded coedge set. */
+    headCoedgeId: number;
+    /** Coedge id whose next link leaves the decoded coedge set. */
+    tailCoedgeId: number;
+    /** External/non-coedge predecessor referenced by the head coedge. */
+    terminalPrevId: number;
+    /** External/non-coedge successor referenced by the tail coedge. */
+    terminalNextId: number;
+    /** Coedges in linked-list order from head to tail. */
+    orderedCoedges: PsCoedgeRecord[];
+}
+
 /** Decoded type-29 point record found in the post-sentinel gap. */
 export interface PsGapPointRecord {
     /** Byte offset of the preceding sentinel. */
@@ -525,6 +539,40 @@ export class ParasolidParser {
                 nextCoedgeId: entity.refs[2],
                 vertexPointId: entity.refs[3],
             }));
+    }
+
+    /** Recover the single ordered coedge chain when the links form one path. */
+    parseCoedgeChain(): PsCoedgeChain | null {
+        const coedges = this.parseCoedgeRecords();
+        if (coedges.length === 0) return null;
+
+        const coedgeIds = new Set(coedges.map((record) => record.id));
+        const coedgeById = new Map(coedges.map((record) => [record.id, record]));
+        const heads = coedges.filter((record) => !coedgeIds.has(record.prevCoedgeId));
+        const tails = coedges.filter((record) => !coedgeIds.has(record.nextCoedgeId));
+        if (heads.length !== 1 || tails.length !== 1) return null;
+
+        const orderedCoedges: PsCoedgeRecord[] = [];
+        const seen = new Set<number>();
+        let current: PsCoedgeRecord | undefined = heads[0];
+
+        while (current && !seen.has(current.id)) {
+            orderedCoedges.push(current);
+            seen.add(current.id);
+            current = coedgeById.get(current.nextCoedgeId);
+        }
+
+        if (orderedCoedges.length !== coedges.length) return null;
+        const tail = orderedCoedges[orderedCoedges.length - 1];
+        if (tail.id !== tails[0].id) return null;
+
+        return {
+            headCoedgeId: heads[0].id,
+            tailCoedgeId: tail.id,
+            terminalPrevId: heads[0].prevCoedgeId,
+            terminalNextId: tail.nextCoedgeId,
+            orderedCoedges,
+        };
     }
 
     /** Decode type-29 gap point records that immediately follow sentinels. */
