@@ -87,6 +87,62 @@ export interface PsEntityCensus {
     other: number;
 }
 
+/** Parsed field-layout token from the schema block. */
+export interface PsSchemaFieldDefinition {
+    /** Byte offset where the type-code token starts. */
+    offset: number;
+    /** First byte after the encoded field name. */
+    endOffset: number;
+    /** Compact type-code sequence such as "CId" or "RA". */
+    typeCodes: string;
+    /** Printable field-name token that follows the type-code sequence. */
+    name: string;
+}
+
+/** Parsed named class definition from the post-schema metadata catalogue. */
+export interface PsNamedClassDefinition {
+    /** Byte offset where the class name starts. */
+    offset: number;
+    /** First byte after the fixed-width class metadata trailer. */
+    endOffset: number;
+    /** Printable class name, e.g. BODY_MATCH or SDL/TYSA_COLOUR. */
+    name: string;
+    /** Observed class marker following the NUL terminator. */
+    classType: 'P' | 'O' | 'Q';
+    /** Raw flag byte observed after the class-type marker. */
+    flags: number;
+    /** Additional uint16 metadata preserved verbatim for clean-room analysis. */
+    extra: number;
+    /** Observed field-count or arity byte. */
+    count: number;
+    /** Parent/class-link identifier from the class metadata block. */
+    parentId: number;
+    /** First field-definition index referenced by this class. */
+    fieldStart: number;
+    /** Last field-definition index referenced by this class. */
+    fieldEnd: number;
+}
+
+/** Parsed metadata envelope around the schema and named class catalogue. */
+export interface PsSchemaMetadata {
+    /** Full schema identifier (e.g. SCH_3000269_30000_13006). */
+    schemaId: string;
+    /** Offset of the SCH_ identifier. */
+    schemaOffset: number;
+    /** First byte after the printable schema identifier. */
+    schemaTerminatorOffset: number;
+    /** Best-effort end of the schema/class metadata area. */
+    metadataEndOffset: number;
+    /** First detected pre-sentinel entity header, if present. */
+    firstEntityOffset: number | null;
+    /** First sentinel offset, if a sentinel zone exists. */
+    firstSentinelOffset: number | null;
+    /** Parsed field-layout tokens from the schema block. */
+    fieldDefinitions: PsSchemaFieldDefinition[];
+    /** Parsed named class definitions from the class catalogue. */
+    namedClasses: PsNamedClassDefinition[];
+}
+
 /** Marker bytes at the start of every entity record of type A. */
 const RECORD_MARKER_P = 0x70; // '=p'
 /** Marker bytes at the start of every entity record of type B. */
@@ -111,6 +167,26 @@ const ENTITY_BSPLINE = 0x1f;   // B-SPLINE curve/surface
 const ENTITY_SHELL = 0x11;     // BODY/REGION/SHELL container
 const ENTITY_LOOP = 0x13;      // LOOP — ordered set of coedges
 const ENTITY_ATTRIB = 0x20;    // ATTRIB/TRANSFORM — additional surface geometry
+
+/** Observed one-byte type codes used inside the compact schema field block. */
+const SCHEMA_FIELD_TYPE_BYTES = new Set<number>([
+    0x41, // A
+    0x43, // C
+    0x44, // D
+    0x46, // F
+    0x49, // I
+    0x4a, // J
+    0x51, // Q
+    0x52, // R
+    0x64, // d
+]);
+
+/** Named class records use a single marker byte after the NUL terminator. */
+const NAMED_CLASS_TYPE_BYTES = new Map<number, 'P' | 'O' | 'Q'>([
+    [0x50, 'P'],
+    [0x4f, 'O'],
+    [0x51, 'Q'],
+]);
 
 /**
  * Bytes from the type marker (00 1D) to the start of coordinate data
@@ -201,6 +277,76 @@ export class ParasolidParser {
     }
 
     /**
+     * Decode the public, pre-entity schema metadata envelope.
+     *
+     * This is still a clean-room structural parse, not a full semantic decode:
+     * it preserves field tokens and named class relations exactly as observed so
+     * later investigations can map them onto entity layouts without relying on
+     * proprietary SDK knowledge.
+     */
+    parseSchemaMetadata(): PsSchemaMetadata | null {
+        const buf = this.buf;
+        const schIdx = buf.indexOf('SCH_', 0, 'ascii');
+        if (schIdx < 0) return null;
+
+        let schemaTerminatorOffset = schIdx;
+        while (schemaTerminatorOffset < buf.length) {
+            const byte = buf[schemaTerminatorOffset];
+            if (byte === 0x00 || byte === 0x0a || byte === 0x0d) break;
+            if (byte < 0x20 || byte > 0x7e) break;
+            schemaTerminatorOffset++;
+        }
+
+        const schemaId = buf.subarray(schIdx, schemaTerminatorOffset).toString('ascii');
+        const firstSentinelOffset = buf.indexOf(SENTINEL);
+        const schemaRegionEnd = firstSentinelOffset >= 0
+            ? firstSentinelOffset
+            : Math.min(buf.length, schemaTerminatorOffset + 4096);
+
+        const fieldDefinitions = this.parseSchemaFieldDefinitions(
+            schemaTerminatorOffset + 1,
+            Math.min(schemaRegionEnd, schemaTerminatorOffset + 2048),
+        );
+        const namedClasses = this.parseNamedClassDefinitions(
+            schemaTerminatorOffset + 1,
+            schemaRegionEnd,
+        );
+
+        let metadataEndOffset = schemaTerminatorOffset + 1;
+        const lastSchemaTerminator = this.findLastSchemaTerminator(
+            schemaTerminatorOffset + 1,
+            schemaRegionEnd,
+        );
+        if (lastSchemaTerminator >= 0) metadataEndOffset = lastSchemaTerminator + 1;
+        for (const fieldDefinition of fieldDefinitions) {
+            if (fieldDefinition.endOffset > metadataEndOffset) {
+                metadataEndOffset = fieldDefinition.endOffset;
+            }
+        }
+        for (const namedClass of namedClasses) {
+            if (namedClass.endOffset > metadataEndOffset) {
+                metadataEndOffset = namedClass.endOffset;
+            }
+        }
+
+        const firstEntityOffset = this.findFirstLinearRecordOffset(
+            metadataEndOffset,
+            schemaRegionEnd,
+        );
+
+        return {
+            schemaId,
+            schemaOffset: schIdx,
+            schemaTerminatorOffset,
+            metadataEndOffset,
+            firstEntityOffset,
+            firstSentinelOffset: firstSentinelOffset >= 0 ? firstSentinelOffset : null,
+            fieldDefinitions,
+            namedClasses,
+        };
+    }
+
+    /**
      * Scan the buffer for entity class names defined in the class catalogue.
      *
      * Entity class definitions begin after the schema section and are
@@ -208,7 +354,12 @@ export class ParasolidParser {
      */
     findEntityClasses(): string[] {
         const buf = this.buf;
-        const classes: string[] = [];
+        const classes = new Set<string>();
+        const metadata = this.parseSchemaMetadata();
+        for (const namedClass of metadata?.namedClasses ?? []) {
+            classes.add(namedClass.name);
+        }
+
         // Known Parasolid topology class names to look for
         const knownNames = [
             'BODY', 'REGION', 'LUMP', 'SHELL', 'FACE', 'LOOP', 'FIN',
@@ -220,9 +371,9 @@ export class ParasolidParser {
 
         for (const name of knownNames) {
             const idx = buf.indexOf(name, 0, 'ascii');
-            if (idx >= 0) classes.push(name);
+            if (idx >= 0) classes.add(name);
         }
-        return classes;
+        return [...classes];
     }
 
     /**
@@ -492,13 +643,21 @@ export class ParasolidParser {
         const points: PsPoint[] = [];
         const seen = new Set<string>();
 
-        // Skip past the header + schema + class definitions (typically < 0x600)
-        // Find the last 'Z' (0x5A) in the first 4096 bytes as the end of class defs
+        // Skip past the header + schema + class definitions. Only trust the
+        // decoded metadata envelope when it also yields a plausible first
+        // entity header; some files (notably FTC_11) have valid packed data
+        // between the class catalogue and the first sentinel, and a hard cut
+        // at metadataEndOffset would skip that region.
         let dataStart = 0x400;  // Conservative default
-        for (let i = Math.min(0x1000, buf.length) - 1; i >= 0x60; i--) {
-            if (buf[i] === 0x5a) { // 'Z' — schema end marker
-                dataStart = i + 1;
-                break;
+        const schemaMetadata = this.parseSchemaMetadata();
+        if (schemaMetadata && schemaMetadata.firstEntityOffset !== null) {
+            dataStart = Math.max(dataStart, schemaMetadata.metadataEndOffset);
+        } else {
+            for (let i = Math.min(0x1000, buf.length) - 1; i >= 0x60; i--) {
+                if (buf[i] === 0x5a) { // 'Z' — schema end marker
+                    dataStart = i + 1;
+                    break;
+                }
             }
         }
 
@@ -591,6 +750,150 @@ export class ParasolidParser {
         }
 
         return entities;
+    }
+
+    /** Parse type-code/name tokens from the schema block. @internal */
+    private parseSchemaFieldDefinitions(start: number, end: number): PsSchemaFieldDefinition[] {
+        const definitions: PsSchemaFieldDefinition[] = [];
+
+        for (let offset = start; offset < end; offset++) {
+            if (!SCHEMA_FIELD_TYPE_BYTES.has(this.buf[offset])) continue;
+
+            let typeEnd = offset;
+            while (typeEnd < end && SCHEMA_FIELD_TYPE_BYTES.has(this.buf[typeEnd])) {
+                typeEnd++;
+            }
+            const typeLength = typeEnd - offset;
+            if (typeLength === 0 || typeLength > 8 || typeEnd >= end) continue;
+
+            const nameLength = this.buf[typeEnd];
+            if (nameLength <= 0 || nameLength > 96) continue;
+
+            const nameStart = typeEnd + 1;
+            const nameEnd = nameStart + nameLength;
+            if (nameEnd > end) continue;
+
+            const name = this.buf.subarray(nameStart, nameEnd).toString('ascii');
+            if (!/^[\x20-\x7e]+$/.test(name) || !/[A-Za-z]/.test(name)) continue;
+
+            definitions.push({
+                offset,
+                endOffset: nameEnd,
+                typeCodes: this.buf.subarray(offset, typeEnd).toString('ascii'),
+                name,
+            });
+            offset = nameEnd - 1;
+        }
+
+        return definitions;
+    }
+
+    /** Parse the named class catalogue that follows the schema field block. @internal */
+    private parseNamedClassDefinitions(start: number, end: number): PsNamedClassDefinition[] {
+        const namedClasses: PsNamedClassDefinition[] = [];
+
+        for (let offset = start; offset + 12 <= end; offset++) {
+            if (!ParasolidParser.isNamedClassChar(this.buf[offset])) continue;
+
+            let nameEnd = offset;
+            while (nameEnd < end && ParasolidParser.isNamedClassChar(this.buf[nameEnd])) {
+                nameEnd++;
+            }
+            const nameLength = nameEnd - offset;
+            if (nameLength < 3 || nameLength > 80) {
+                offset = nameEnd;
+                continue;
+            }
+            if (nameEnd + 11 >= end || this.buf[nameEnd] !== 0x00) {
+                offset = nameEnd;
+                continue;
+            }
+
+            const classType = NAMED_CLASS_TYPE_BYTES.get(this.buf[nameEnd + 1]);
+            if (!classType) {
+                offset = nameEnd;
+                continue;
+            }
+
+            const name = this.buf.subarray(offset, nameEnd).toString('ascii');
+            if (!/^[A-Za-z0-9_\/-]+$/.test(name)) {
+                offset = nameEnd;
+                continue;
+            }
+
+            namedClasses.push({
+                offset,
+                endOffset: nameEnd + 12,
+                name,
+                classType,
+                flags: this.buf[nameEnd + 2],
+                extra: this.buf.readUInt16BE(nameEnd + 3),
+                count: this.buf[nameEnd + 5],
+                parentId: this.buf.readUInt16BE(nameEnd + 6),
+                fieldStart: this.buf.readUInt16BE(nameEnd + 8),
+                fieldEnd: this.buf.readUInt16BE(nameEnd + 10),
+            });
+            offset = nameEnd + 11;
+        }
+
+        return namedClasses;
+    }
+
+    /** Find the last schema-block terminator ('Z') before the entity region. @internal */
+    private findLastSchemaTerminator(start: number, end: number): number {
+        for (let offset = end - 1; offset >= start; offset--) {
+            if (this.buf[offset] === 0x5a) return offset;
+        }
+        return -1;
+    }
+
+    /** Find the first plausible linear entity header between metadata and the sentinel zone. @internal */
+    private findFirstLinearRecordOffset(start: number, end: number): number | null {
+        for (let offset = start; offset + 16 <= end; offset++) {
+            if (this.isCompactLinearRecord(offset, end) || this.isPackedLinearRecord(offset, end)) {
+                return offset;
+            }
+        }
+        return null;
+    }
+
+    /** Compact pre-sentinel header: [00 type] [id:2] [00 00] [flags:2] [00 01]. @internal */
+    private isCompactLinearRecord(offset: number, end: number): boolean {
+        if (offset + 10 > end) return false;
+        if (this.buf[offset] !== 0x00) return false;
+        const type = this.buf[offset + 1];
+        if (type < 0x0f || type > 0x90) return false;
+        const id = this.buf.readUInt16BE(offset + 2);
+        if (id === 0 || id > 10000) return false;
+        if (this.buf[offset + 4] !== 0x00 || this.buf[offset + 5] !== 0x00) return false;
+        return this.buf[offset + 8] === 0x00 && this.buf[offset + 9] === 0x01;
+    }
+
+    /** Packed FF-style header observed before the sentinel zone. @internal */
+    private isPackedLinearRecord(offset: number, end: number): boolean {
+        if (offset + 16 > end) return false;
+        if (this.buf[offset] !== 0x00 || this.buf[offset + 2] !== 0xff) return false;
+        const type = this.buf[offset + 1];
+        if (type < 0x0f || type > 0x90) return false;
+        const id = this.buf.readUInt16BE(offset + 3);
+        if (id === 0 || id > 10000) return false;
+        if (this.buf[offset + 5] !== 0x00 || this.buf[offset + 6] !== 0x00) return false;
+
+        let smallRefs = 0;
+        for (let refOffset = offset + 8; refOffset < offset + 16; refOffset += 2) {
+            if (this.buf.readUInt16BE(refOffset) <= 60000) smallRefs++;
+        }
+        return smallRefs >= 4 || this.tryReadTriplet(this.buf, offset + 16) !== null;
+    }
+
+    /** Allowed character set for named class tokens. @internal */
+    private static isNamedClassChar(byte: number): boolean {
+        return (byte >= 0x30 && byte <= 0x39) ||
+            (byte >= 0x41 && byte <= 0x5a) ||
+            (byte >= 0x61 && byte <= 0x7a) ||
+            byte === 0x2f ||
+            byte === 0x2d ||
+            byte === 0x5f;
     }
 
     /**

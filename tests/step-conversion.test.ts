@@ -86,6 +86,27 @@ describe('ParasolidParser', () => {
         expect(header!.schemaId).toContain('SCH_');
     });
 
+    it('parses schema metadata from a real transmit file', () => {
+        if (!hasSamples) return;
+        const buf = readFileSync(sampleFiles[0]);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const metadata = parser.parseSchemaMetadata();
+
+        expect(metadata).not.toBeNull();
+        if (!metadata) return;
+
+        expect(metadata.schemaId).toContain('SCH_');
+        expect(metadata.fieldDefinitions.length).toBeGreaterThan(0);
+        expect(metadata.namedClasses.length).toBeGreaterThan(0);
+        expect(metadata.metadataEndOffset).toBeGreaterThan(metadata.schemaTerminatorOffset);
+        expect(metadata.firstSentinelOffset).not.toBeNull();
+        expect((metadata.firstSentinelOffset ?? 0)).toBeGreaterThan(metadata.metadataEndOffset);
+    });
+
     it('finds entity classes in a real transmit file', () => {
         if (!hasSamples) return;
         const buf = readFileSync(sampleFiles[0]);
