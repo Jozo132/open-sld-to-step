@@ -205,6 +205,42 @@ export interface PsCoedgeChain {
     orderedCoedges: PsCoedgeRecord[];
 }
 
+/** Decoded compact type-16 record whose sentinel starts the payload area. */
+export interface PsEdgeRecord {
+    /** Byte offset of the embedded sentinel. */
+    sentinelOffset: number;
+    /** Raw edge entity id. */
+    id: number;
+    /** Raw flags field. */
+    flags: number;
+    /** First observed payload reference; semantics still unresolved. */
+    firstRefId: number;
+    /** Previous edge-like link in the observed type-16 graph. */
+    prevEdgeId: number;
+    /** Next edge-like link in the observed type-16 graph. */
+    nextEdgeId: number;
+    /** Geometry-like reference that often resolves to type-30 records. */
+    geometryLikeId: number;
+    /** Trailing payload ref; observed as a stable small terminal value. */
+    trailingRefAId: number;
+    /** Trailing payload ref; observed as a stable small terminal value. */
+    trailingRefBId: number;
+}
+
+/** Ordered type-16 component recovered from prev/next links. */
+export interface PsEdgeComponent {
+    /** Edge id whose previous link leaves the decoded type-16 set. */
+    headEdgeId: number;
+    /** Edge id whose next link leaves the decoded type-16 set. */
+    tailEdgeId: number;
+    /** External/non-type-16 predecessor referenced by the component head. */
+    terminalPrevId: number;
+    /** External/non-type-16 successor referenced by the component tail. */
+    terminalNextId: number;
+    /** Type-16 records in linked order from head to tail. */
+    orderedEdges: PsEdgeRecord[];
+}
+
 /** Decoded type-29 point record found in the post-sentinel gap. */
 export interface PsGapPointRecord {
     /** Byte offset of the preceding sentinel. */
@@ -573,6 +609,80 @@ export class ParasolidParser {
             terminalNextId: tail.nextCoedgeId,
             orderedCoedges,
         };
+    }
+
+    /** Decode compact type-16 records whose sentinel starts the payload area. */
+    parseEdgeRecords(): PsEdgeRecord[] {
+        const records: PsEdgeRecord[] = [];
+
+        for (const sentinelOffset of this.findEightByteSentinelOffsets()) {
+            const headerOffset = sentinelOffset - 10;
+            if (headerOffset < 0) continue;
+
+            const header = this.parseLinearEntityHeader(headerOffset, sentinelOffset);
+            if (!header || header.format !== 'compact' || header.type !== ENTITY_EDGE) continue;
+
+            const refsStart = sentinelOffset + SENTINEL_8.length;
+            const refsEnd = refsStart + 12;
+            if (refsEnd > this.buf.length) continue;
+
+            records.push({
+                sentinelOffset,
+                id: header.id,
+                flags: header.flags,
+                firstRefId: this.buf.readUInt16BE(refsStart),
+                prevEdgeId: this.buf.readUInt16BE(refsStart + 2),
+                nextEdgeId: this.buf.readUInt16BE(refsStart + 4),
+                geometryLikeId: this.buf.readUInt16BE(refsStart + 6),
+                trailingRefAId: this.buf.readUInt16BE(refsStart + 8),
+                trailingRefBId: this.buf.readUInt16BE(refsStart + 10),
+            });
+        }
+
+        return records;
+    }
+
+    /** Recover ordered type-16 components from the observed prev/next links. */
+    parseEdgeComponents(): PsEdgeComponent[] {
+        const edges = this.parseEdgeRecords();
+        if (edges.length === 0) return [];
+
+        const edgeIds = new Set(edges.map((record) => record.id));
+        const edgeById = new Map(edges.map((record) => [record.id, record]));
+        const components: PsEdgeComponent[] = [];
+        const seen = new Set<number>();
+        const starts = edges.filter((record) => !edgeIds.has(record.prevEdgeId));
+
+        const walkComponent = (start: PsEdgeRecord): void => {
+            const orderedEdges: PsEdgeRecord[] = [];
+            let current: PsEdgeRecord | undefined = start;
+
+            while (current && !seen.has(current.id)) {
+                orderedEdges.push(current);
+                seen.add(current.id);
+                current = edgeById.get(current.nextEdgeId);
+            }
+
+            if (orderedEdges.length === 0) return;
+            const tail = orderedEdges[orderedEdges.length - 1];
+            components.push({
+                headEdgeId: start.id,
+                tailEdgeId: tail.id,
+                terminalPrevId: start.prevEdgeId,
+                terminalNextId: tail.nextEdgeId,
+                orderedEdges,
+            });
+        };
+
+        for (const start of starts) {
+            if (!seen.has(start.id)) walkComponent(start);
+        }
+
+        for (const edge of edges) {
+            if (!seen.has(edge.id)) walkComponent(edge);
+        }
+
+        return components;
     }
 
     /** Decode type-29 gap point records that immediately follow sentinels. */

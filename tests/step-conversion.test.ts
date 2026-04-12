@@ -286,6 +286,81 @@ describe('ParasolidParser', () => {
         expect(chain.orderedCoedges.slice(-4).map(record => record.id)).toEqual([701, 704, 707, 710]);
     });
 
+    it('decodes compact type-16 edge records across NIST samples', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const edges = parser.parseEdgeRecords();
+
+            expect(edges.length).toBeGreaterThan(0);
+            expect(new Set(edges.map(record => record.id)).size).toBe(edges.length);
+        }
+    });
+
+    it('reconstructs ordered type-16 components across NIST samples', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const edges = parser.parseEdgeRecords();
+            const components = parser.parseEdgeComponents();
+            const edgeIds = new Set(edges.map(record => record.id));
+            const prevResolved = edges.filter(record => edgeIds.has(record.prevEdgeId)).length;
+            const nextResolved = edges.filter(record => edgeIds.has(record.nextEdgeId)).length;
+            const totalEdgesInComponents = components.reduce((sum, component) => sum + component.orderedEdges.length, 0);
+            const fileName = basename(filePath).toLowerCase();
+
+            expect(totalEdgesInComponents).toBe(edges.length);
+            expect(prevResolved).toBe(edges.length - components.length);
+            expect(nextResolved).toBe(edges.length - components.length);
+
+            if (fileName === 'nist_ctc_01_asme1_rd_sw1802.sldprt') {
+                expect(components).toHaveLength(12);
+                continue;
+            }
+
+            if (fileName === 'nist_ctc_03_asme1_rc_sw1802.sldprt') {
+                expect(components).toHaveLength(4);
+                continue;
+            }
+
+            expect(components).toHaveLength(1);
+            expect(components[0].terminalNextId).toBe(1);
+        }
+    });
+
+    it('stabilizes the FTC_11 type-16 component chain', () => {
+        if (!ftc11Path) return;
+
+        const buf = readFileSync(ftc11Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const edges = parser.parseEdgeRecords();
+        const components = parser.parseEdgeComponents();
+
+        expect(edges.map(record => record.id)).toEqual([49, 53, 57, 62, 65]);
+        expect(components).toHaveLength(1);
+        expect(components[0].headEdgeId).toBe(49);
+        expect(components[0].tailEdgeId).toBe(65);
+        expect(components[0].terminalPrevId).toBe(13);
+        expect(components[0].terminalNextId).toBe(1);
+        expect(components[0].orderedEdges.map(record => record.id)).toEqual([49, 53, 57, 62, 65]);
+    });
+
     it('finds entity classes in a real transmit file', () => {
         if (!hasSamples) return;
         const buf = readFileSync(sampleFiles[0]);

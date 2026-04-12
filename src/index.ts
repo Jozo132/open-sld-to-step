@@ -42,6 +42,16 @@ export {
 export type {
     PsTransmitHeader,
     PsEntityCensus,
+    PsSchemaFieldDefinition,
+    PsNamedClassDefinition,
+    PsSchemaMetadata,
+    PsLinearEntityHeader,
+    PsSentinelAlignedEntity,
+    PsCoedgeRecord,
+    PsCoedgeChain,
+    PsGapPointRecord,
+    PsEdgeRecord,
+    PsEdgeComponent,
 } from './parser/ParasolidParser.js';
 
 // STEP mapper
