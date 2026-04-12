@@ -161,6 +161,18 @@ export interface PsLinearEntityHeader {
     trailer: number | null;
 }
 
+/** Decoded record anchored to a sentinel occurrence in the linear entity zone. */
+export interface PsSentinelAlignedEntity {
+    /** Byte offset of the 8-byte sentinel instance. */
+    sentinelOffset: number;
+    /** Whether the sentinel terminates the record or appears as embedded data. */
+    role: 'terminator' | 'embedded-data';
+    /** Decoded linear entity header associated with this sentinel. */
+    header: PsLinearEntityHeader;
+    /** Best-effort small uint16 references associated with this record. */
+    refs: number[];
+}
+
 /** Marker bytes at the start of every entity record of type A. */
 const RECORD_MARKER_P = 0x70; // '=p'
 /** Marker bytes at the start of every entity record of type B. */
@@ -174,6 +186,7 @@ const RECORD_PREFIX = 0x3d; // '='
  * MBD 2018 test files (both marker and markerless variants).
  */
 const SENTINEL = Buffer.from([0xc2, 0xbc, 0x92, 0x8f, 0x99, 0x6e]);
+const SENTINEL_8 = Buffer.from([0xc2, 0xbc, 0x92, 0x8f, 0x99, 0x6e, 0x00, 0x00]);
 
 /** Known entity type codes (2nd byte of the 00 XX type marker). */
 const ENTITY_POINT = 0x1d;     // POINT — contains 3×float64 BE coordinates
@@ -413,6 +426,52 @@ export class ParasolidParser {
             }
         }
         return { pRecords, qRecords };
+    }
+
+    /**
+     * Decode linear records aligned to observed 8-byte sentinels.
+     *
+     * Clean-room findings so far support two stable forms:
+     * - compact record terminator: header + 4 refs + sentinel
+     * - packed/FF record: header + sentinel + optional small refs
+     */
+    parseSentinelAlignedEntities(): PsSentinelAlignedEntity[] {
+        const entities: PsSentinelAlignedEntity[] = [];
+
+        for (const sentinelOffset of this.findEightByteSentinelOffsets()) {
+            const compactOffset = sentinelOffset - 18;
+            if (compactOffset >= 0) {
+                const header = this.parseLinearEntityHeader(compactOffset, sentinelOffset);
+                if (header?.format === 'compact') {
+                    entities.push({
+                        sentinelOffset,
+                        role: 'terminator',
+                        header,
+                        refs: [
+                            this.buf.readUInt16BE(compactOffset + 10),
+                            this.buf.readUInt16BE(compactOffset + 12),
+                            this.buf.readUInt16BE(compactOffset + 14),
+                            this.buf.readUInt16BE(compactOffset + 16),
+                        ],
+                    });
+                }
+            }
+
+            const packedOffset = sentinelOffset - 11;
+            if (packedOffset >= 0) {
+                const header = this.parseLinearEntityHeader(packedOffset, sentinelOffset);
+                if (header?.format === 'packed') {
+                    entities.push({
+                        sentinelOffset,
+                        role: 'embedded-data',
+                        header,
+                        refs: this.readPackedPostSentinelRefs(sentinelOffset),
+                    });
+                }
+            }
+        }
+
+        return entities;
     }
 
     /**
@@ -891,6 +950,17 @@ export class ParasolidParser {
         return null;
     }
 
+    /** Find every observed 8-byte sentinel in the linear entity zone. @internal */
+    private findEightByteSentinelOffsets(): number[] {
+        const offsets: number[] = [];
+        let searchOffset = 0;
+        while ((searchOffset = this.buf.indexOf(SENTINEL_8, searchOffset)) >= 0) {
+            offsets.push(searchOffset);
+            searchOffset += SENTINEL_8.length;
+        }
+        return offsets;
+    }
+
     /** Decode a compact or packed linear entity header if one starts at offset. @internal */
     private parseLinearEntityHeader(offset: number, end: number): PsLinearEntityHeader | null {
         if (this.isCompactLinearRecord(offset, end)) {
@@ -916,6 +986,21 @@ export class ParasolidParser {
         }
 
         return null;
+    }
+
+    /** Read packed-record refs after an embedded sentinel when they look like IDs. @internal */
+    private readPackedPostSentinelRefs(sentinelOffset: number): number[] {
+        const refs: number[] = [];
+        const refsStart = sentinelOffset + SENTINEL_8.length;
+        const refsEnd = Math.min(this.buf.length, refsStart + 12);
+
+        for (let offset = refsStart; offset + 2 <= refsEnd; offset += 2) {
+            const ref = this.buf.readUInt16BE(offset);
+            if (ref > 10000) return [];
+            refs.push(ref);
+        }
+
+        return refs;
     }
 
     /** Compact pre-sentinel header: [00 type] [id:2] [00 00] [flags:2] [00 01]. @internal */

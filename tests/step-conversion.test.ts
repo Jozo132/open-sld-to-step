@@ -132,6 +132,49 @@ describe('ParasolidParser', () => {
         }
     });
 
+    it('parses sentinel-aligned linear records across NIST samples', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const metadata = parser.parseSchemaMetadata();
+            const records = parser.parseSentinelAlignedEntities();
+
+            expect(records.length).toBeGreaterThan(0);
+            const firstHeaderIsSentinelAdjacent = metadata?.firstSentinelOffset !== null &&
+                metadata?.firstSentinelOffset !== undefined &&
+                metadata?.firstEntityOffset !== null &&
+                metadata.firstSentinelOffset - metadata.firstEntityOffset <= 18;
+            if (firstHeaderIsSentinelAdjacent) {
+                expect(records.some(record => record.sentinelOffset === metadata.firstSentinelOffset)).toBe(true);
+            }
+        }
+    });
+
+    it('finds both compact and packed sentinel record forms in CTC_01', () => {
+        if (!hasSamples) return;
+        const targetPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ctc_01_asme1_rd_sw1802.sldprt',
+        );
+        if (!targetPath) return;
+
+        const buf = readFileSync(targetPath);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const records = parser.parseSentinelAlignedEntities();
+
+        expect(records.some(record => record.role === 'embedded-data' && record.header.type === 16)).toBe(true);
+        expect(records.some(record => record.role === 'terminator' && record.header.type === 18)).toBe(true);
+    });
+
     it('finds entity classes in a real transmit file', () => {
         if (!hasSamples) return;
         const buf = readFileSync(sampleFiles[0]);
