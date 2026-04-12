@@ -532,6 +532,87 @@ describe('ParasolidParser', () => {
         expect(extended.get(3434)).toMatchObject({ type: 32, refIds: [3436, 3430, 3437, 1], markerByte: 0x2b });
     });
 
+    it('decodes packed geometry-like records for unresolved edge targets', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const packed = parser.parsePackedGeometryLikeRecords();
+
+            expect(new Set(packed.map(record => record.id)).size).toBe(packed.length);
+            expect(packed.every(record => [30, 31, 32].includes(record.type))).toBe(true);
+            expect(packed.every(record => record.markerByte === 0x2b || record.markerByte === 0x2d)).toBe(true);
+        }
+    });
+
+    it('combines compact and packed geometry-like indices for near-complete edge resolution', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const compact = new Set(parser.parseCompactGeometryLikeRecords().map(record => record.id));
+            const combined = new Set(parser.parseAllGeometryLikeRecords().map(record => record.id));
+            const edges = parser.parseEdgeRecords();
+
+            const compactResolved = edges.filter(edge => compact.has(edge.geometryLikeId)).length;
+            const combinedResolved = edges.filter(edge => combined.has(edge.geometryLikeId)).length;
+
+            expect(combinedResolved).toBeGreaterThanOrEqual(compactResolved);
+            if (basename(filePath).toLowerCase() === 'nist_ftc_07_asme1_rd_sw1802.sldprt') {
+                expect(combinedResolved).toBe(560);
+                continue;
+            }
+        }
+    });
+
+    it('captures representative CTC_01 packed geometry-like records', () => {
+        if (!ctc01Path) return;
+
+        const buf = readFileSync(ctc01Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const packed = new Map(parser.parsePackedGeometryLikeRecords().map(record => [record.id, record]));
+        const combined = new Set(parser.parseAllGeometryLikeRecords().map(record => record.id));
+        const edges = parser.parseEdgeRecords();
+
+        expect(packed.get(774)).toMatchObject({ type: 31, refIds: [764, 765, 775, 1], markerByte: 0x2b, trailer: 1 });
+        expect(packed.get(3430)).toMatchObject({ type: 32, refIds: [3433, 3427, 3434, 1], markerByte: 0x2d, trailer: 1 });
+        expect(packed.get(10)).toMatchObject({ type: 30, refIds: [44, 45, 1, 1], markerByte: 0x2d, trailer: 1 });
+        expect(edges.filter(edge => combined.has(edge.geometryLikeId)).length).toBe(357);
+    });
+
+    it('raises CTC_05 geometry-like resolution to the packed-augmented ceiling', () => {
+        if (!hasSamples) return;
+        const targetPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ctc_05_asme1_rd_sw1802.sldprt',
+        );
+        if (!targetPath) return;
+
+        const buf = readFileSync(targetPath);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const combined = new Set(parser.parseAllGeometryLikeRecords().map(record => record.id));
+        const edges = parser.parseEdgeRecords();
+
+        expect(edges.filter(edge => combined.has(edge.geometryLikeId)).length).toBe(329);
+    });
+
     it('finds entity classes in a real transmit file', () => {
         if (!hasSamples) return;
         const buf = readFileSync(sampleFiles[0]);

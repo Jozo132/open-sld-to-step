@@ -274,6 +274,24 @@ export interface PsCompactGeometryRecord {
 /** Dominant compact record family keyed by four refs plus a geometry marker. */
 export interface PsCompactGeometryLikeRecord extends PsCompactGeometryRecord {}
 
+/** Packed FF-format geometry-like record with four refs and a marker at offset 19. */
+export interface PsPackedGeometryLikeRecord {
+    /** Byte offset where the packed header starts. */
+    offset: number;
+    /** Raw record type byte (currently observed: 0x1E, 0x1F, 0x20). */
+    type: number;
+    /** Raw geometry-like entity id. */
+    id: number;
+    /** Raw flags field. */
+    flags: number;
+    /** Packed-header trailer field. */
+    trailer: number;
+    /** Four observed uint16 refs that precede the geometry marker. */
+    refIds: [number, number, number, number];
+    /** Marker byte that begins the float payload, usually 0x2B or 0x2D. */
+    markerByte: number;
+}
+
 /** Decoded type-29 point record found in the post-sentinel gap. */
 export interface PsGapPointRecord {
     /** Byte offset of the preceding sentinel. */
@@ -788,6 +806,59 @@ export class ParasolidParser {
         return this.parseCompactGeometryFamilyRecords(
             new Set([ENTITY_SURFACE, ENTITY_BSPLINE, ENTITY_ATTRIB, ENTITY_GEOM_AUX]),
         );
+    }
+
+    /** Decode packed FF-format geometry-like records used by unresolved edge links. */
+    parsePackedGeometryLikeRecords(): PsPackedGeometryLikeRecord[] {
+        const records: PsPackedGeometryLikeRecord[] = [];
+
+        for (let offset = 0; offset + 20 <= this.buf.length; offset++) {
+            if (this.buf[offset] !== 0x00 || this.buf[offset + 2] !== 0xff) continue;
+            const type = this.buf[offset + 1];
+            if (type !== ENTITY_SURFACE && type !== ENTITY_BSPLINE && type !== ENTITY_ATTRIB) continue;
+            if (this.buf[offset + 5] !== 0x00 || this.buf[offset + 6] !== 0x00) continue;
+
+            const id = this.buf.readUInt16BE(offset + 3);
+            if (id === 0 || id > 10000) continue;
+
+            const flags = this.buf.readUInt16BE(offset + 7);
+            const trailer = this.buf.readUInt16BE(offset + 9);
+            if (trailer === 0 || trailer > 0x0400) continue;
+
+            const markerByte = this.buf[offset + 19];
+            if (markerByte !== 0x2b && markerByte !== 0x2d) continue;
+
+            records.push({
+                offset,
+                type,
+                id,
+                flags,
+                trailer,
+                refIds: [
+                    this.buf.readUInt16BE(offset + 11),
+                    this.buf.readUInt16BE(offset + 13),
+                    this.buf.readUInt16BE(offset + 15),
+                    this.buf.readUInt16BE(offset + 17),
+                ],
+                markerByte,
+            });
+        }
+
+        return records;
+    }
+
+    /** Merge compact and packed geometry-like records for edge-link resolution. */
+    parseAllGeometryLikeRecords(): Array<PsCompactGeometryLikeRecord | PsPackedGeometryLikeRecord> {
+        const records = new Map<number, PsCompactGeometryLikeRecord | PsPackedGeometryLikeRecord>();
+
+        for (const record of this.parseCompactGeometryLikeRecords()) {
+            records.set(record.id, record);
+        }
+        for (const record of this.parsePackedGeometryLikeRecords()) {
+            if (!records.has(record.id)) records.set(record.id, record);
+        }
+
+        return [...records.values()];
     }
 
     /** Decode compact record families that use four leading refs plus a marker. @internal */
