@@ -53,6 +53,7 @@ export type {
     PsEdgeRecord,
     PsEdgeComponent,
     PsEdgeComponentChain,
+    PsCompactGeometryRecord,
 } from './parser/ParasolidParser.js';
 
 // STEP mapper

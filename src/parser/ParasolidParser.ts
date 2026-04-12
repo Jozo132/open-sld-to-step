@@ -255,6 +255,22 @@ export interface PsEdgeComponentChain {
     orderedComponents: PsEdgeComponent[];
 }
 
+/** Dominant compact type-30/type-31 record with four leading refs and a geometry marker. */
+export interface PsCompactGeometryRecord {
+    /** Byte offset where the compact header starts. */
+    offset: number;
+    /** Raw record type byte (0x1E or 0x1F). */
+    type: number;
+    /** Raw geometry entity id. */
+    id: number;
+    /** Raw flags field. */
+    flags: number;
+    /** Four observed uint16 refs that precede the geometry marker. */
+    refIds: [number, number, number, number];
+    /** Marker byte that begins the float payload, usually 0x2B. */
+    markerByte: number;
+}
+
 /** Decoded type-29 point record found in the post-sentinel gap. */
 export interface PsGapPointRecord {
     /** Byte offset of the preceding sentinel. */
@@ -756,6 +772,40 @@ export class ParasolidParser {
         }
 
         return chains;
+    }
+
+    /** Decode the dominant compact type-30/type-31 geometry record layout. */
+    parseCompactGeometryRecords(): PsCompactGeometryRecord[] {
+        const records: PsCompactGeometryRecord[] = [];
+
+        for (let offset = 0; offset + 19 <= this.buf.length; offset++) {
+            const type = this.buf[offset + 1];
+            if (this.buf[offset] !== 0x00) continue;
+            if (type !== ENTITY_SURFACE && type !== ENTITY_BSPLINE) continue;
+
+            const header = this.parseLinearEntityHeader(offset, this.buf.length);
+            if (!header || header.format !== 'compact') continue;
+
+            const markerByte = this.buf[offset + 18];
+            if (markerByte !== 0x2b && markerByte !== 0x2d) continue;
+
+            records.push({
+                offset,
+                type,
+                id: header.id,
+                flags: header.flags,
+                refIds: [
+                    this.buf.readUInt16BE(offset + 10),
+                    this.buf.readUInt16BE(offset + 12),
+                    this.buf.readUInt16BE(offset + 14),
+                    this.buf.readUInt16BE(offset + 16),
+                ],
+                markerByte,
+            });
+            offset += 9;
+        }
+
+        return records;
     }
 
     /** Decode type-29 gap point records that immediately follow sentinels. */
