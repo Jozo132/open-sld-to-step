@@ -32,6 +32,9 @@ function findSldprtFiles(dir: string): string[] {
 const sampleFiles = findSldprtFiles(DOWNLOADS_DIR);
 const hasSamples = sampleFiles.length > 0;
 const describeWithSamples = hasSamples ? describe : describe.skip;
+const ftc11Path = sampleFiles.find(filePath =>
+    basename(filePath).toLowerCase() === 'nist_ftc_11_asme1_rb_sw1802.sldprt',
+);
 
 // ── Shared conversion cache ─────────────────────────────────────────────────
 // Each file is read and converted exactly once, then all assertions run against
@@ -130,6 +133,26 @@ describe('ParasolidParser', () => {
         const model = parser.parse();
         expect(model.vertices.length).toBeGreaterThan(0);
         expect(model.bodies.length).toBeGreaterThanOrEqual(0);
+    });
+
+    it('recovers FTC_11 as a reusable axisymmetric ring model', () => {
+        if (!ftc11Path) return;
+
+        const buf = readFileSync(ftc11Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        expect(model.surfaces.filter(s => s.surfaceType === 'plane')).toHaveLength(2);
+        expect(model.surfaces.filter(s => s.surfaceType === 'cylinder')).toHaveLength(2);
+        expect(model.surfaces.filter(s => s.surfaceType === 'torus')).toHaveLength(2);
+        expect(model.faces).toHaveLength(6);
+        expect(model.loops).toHaveLength(12);
+        expect(model.edges).toHaveLength(6);
+        expect(model.curves.filter(c => c.curveType === 'circle')).toHaveLength(6);
     });
 });
 

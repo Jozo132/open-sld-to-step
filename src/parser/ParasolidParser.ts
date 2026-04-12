@@ -1630,16 +1630,40 @@ export class ParasolidParser {
         let nextCurveId = 1;
         let nextExtraVtxId = startingVertexId + 1;
 
-        const addCircleEdge = (center: PsPoint, normal: PsPoint, radius: number) => {
-            const seamPoint: PsPoint = { x: center.x + radius, y: center.y, z: center.z };
+        type AxisymmetricBoundary = {
+            key: string;
+            center: PsPoint;
+            normal: PsPoint;
+            radius: number;
+            seamDir: PsPoint;
+        };
+
+        const normalizeDir = (dir: PsPoint): PsPoint => {
+            const mag = Math.sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+            return { x: dir.x / mag, y: dir.y / mag, z: dir.z / mag };
+        };
+
+        const circleBoundaryCache = new Map<string, { edgeId: number; vertexId: number; point: PsPoint }>();
+        const getOrCreateCircleBoundary = (boundary: AxisymmetricBoundary) => {
+            const cached = circleBoundaryCache.get(boundary.key);
+            if (cached) return cached;
+
+            const seamDir = normalizeDir(boundary.seamDir);
+            const seamPoint: PsPoint = {
+                x: boundary.center.x + boundary.radius * seamDir.x,
+                y: boundary.center.y + boundary.radius * seamDir.y,
+                z: boundary.center.z + boundary.radius * seamDir.z,
+            };
             const vertexId = nextExtraVtxId++;
             extraVertices.push({ id: vertexId, position: seamPoint });
+
             const curveId = nextCurveId++;
             curves.push({
                 id: curveId,
                 curveType: 'circle',
-                params: { center, normal, radius },
+                params: { center: boundary.center, normal: boundary.normal, radius: boundary.radius },
             });
+
             const edgeId = nextEdgeId++;
             edges.push({
                 id: edgeId,
@@ -1648,21 +1672,10 @@ export class ParasolidParser {
                 curve: curveId,
                 sense: true,
             });
-            return { edgeId, vertexId, point: seamPoint };
-        };
 
-        const addLineEdge = (startVertex: number, endVertex: number, start: PsPoint, end: PsPoint) => {
-            const curveId = nextCurveId++;
-            curves.push({ id: curveId, curveType: 'line', params: { start, end } });
-            const edgeId = nextEdgeId++;
-            edges.push({
-                id: edgeId,
-                startVertex,
-                endVertex,
-                curve: curveId,
-                sense: true,
-            });
-            return edgeId;
+            const created = { edgeId, vertexId, point: seamPoint };
+            circleBoundaryCache.set(boundary.key, created);
+            return created;
         };
 
         const addLoop = (edgeIds: number[], senses: boolean[]) => {
@@ -1676,82 +1689,67 @@ export class ParasolidParser {
             faces.push({ id: faceId, surface: surfaceId, outerLoop, innerLoops, sense: true });
         };
 
-        const addAnnulusPlaneFace = (
-            planeSurfaceId: number,
-            z: number,
-            outerRadius: number,
-            innerRadius: number,
-            normal: PsPoint,
+        const addTwoBoundaryFace = (
+            surfaceId: number,
+            outerBoundary: AxisymmetricBoundary,
+            innerBoundary: AxisymmetricBoundary,
         ) => {
-            const outer = addCircleEdge({ x: 0, y: 0, z }, normal, outerRadius);
-            const inner = addCircleEdge({ x: 0, y: 0, z }, normal, innerRadius);
+            const outer = getOrCreateCircleBoundary(outerBoundary);
+            const inner = getOrCreateCircleBoundary(innerBoundary);
             const outerLoop = addLoop([outer.edgeId], [true]);
             const innerLoop = addLoop([inner.edgeId], [true]);
-            addFace(planeSurfaceId, outerLoop, [innerLoop]);
+            addFace(surfaceId, outerLoop, [innerLoop]);
         };
 
-        const addBandFace = (
-            surfaceId: number,
-            lowerZValue: number,
-            lowerRadius: number,
-            upperZValue: number,
-            upperRadius: number,
-            normal: PsPoint,
-        ) => {
-            const lower = addCircleEdge({ x: 0, y: 0, z: lowerZValue }, normal, lowerRadius);
-            const upper = addCircleEdge({ x: 0, y: 0, z: upperZValue }, normal, upperRadius);
-            const seam = addLineEdge(lower.vertexId, upper.vertexId, lower.point, upper.point);
-            const loopId = addLoop([lower.edgeId, seam, upper.edgeId, seam], [true, true, false, false]);
-            addFace(surfaceId, loopId);
+        const bottomOuter: AxisymmetricBoundary = {
+            key: `circle-bottom-outer-${bottomZ.toFixed(6)}-${outerCylinder.params.radius.toFixed(6)}`,
+            center: { x: 0, y: 0, z: bottomZ },
+            normal: bottomPlane.params.normal,
+            radius: outerCylinder.params.radius,
+            seamDir: { x: 0, y: -1, z: 0 },
+        };
+        const bottomInner: AxisymmetricBoundary = {
+            key: `circle-bottom-inner-${bottomZ.toFixed(6)}-${innerCylinder.params.radius.toFixed(6)}`,
+            center: { x: 0, y: 0, z: bottomZ },
+            normal: bottomPlane.params.normal,
+            radius: innerCylinder.params.radius,
+            seamDir: { x: 0, y: -1, z: 0 },
+        };
+        const shoulderOuter: AxisymmetricBoundary = {
+            key: `circle-shoulder-outer-${outerTorus.params.baseZ.toFixed(6)}-${outerTorus.params.baseRadius.toFixed(6)}`,
+            center: { x: 0, y: 0, z: outerTorus.params.baseZ },
+            normal: outerCylinder.params.axis,
+            radius: outerTorus.params.baseRadius,
+            seamDir: { x: 0, y: -1, z: 0 },
+        };
+        const shoulderInner: AxisymmetricBoundary = {
+            key: `circle-shoulder-inner-${innerTorus.params.baseZ.toFixed(6)}-${innerTorus.params.baseRadius.toFixed(6)}`,
+            center: { x: 0, y: 0, z: innerTorus.params.baseZ },
+            normal: innerCylinder.params.axis,
+            radius: innerTorus.params.baseRadius,
+            seamDir: { x: 0, y: -1, z: 0 },
+        };
+        const topOuter: AxisymmetricBoundary = {
+            key: `circle-top-outer-${topZ.toFixed(6)}-${outerTorus.params.sectionRadius.toFixed(6)}`,
+            center: { x: 0, y: 0, z: topZ },
+            normal: topPlane.params.normal,
+            radius: outerTorus.params.sectionRadius,
+            seamDir: { x: -1, y: 0, z: 0 },
+        };
+        const topInner: AxisymmetricBoundary = {
+            key: `circle-top-inner-${topZ.toFixed(6)}-${innerTorus.params.sectionRadius.toFixed(6)}`,
+            center: { x: 0, y: 0, z: topZ },
+            normal: topPlane.params.normal,
+            radius: innerTorus.params.sectionRadius,
+            seamDir: { x: -1, y: 0, z: 0 },
         };
 
-        addAnnulusPlaneFace(
-            bottomPlane.surface.id,
-            bottomZ,
-            outerCylinder.params.radius,
-            innerCylinder.params.radius,
-            bottomPlane.params.normal,
-        );
-        addAnnulusPlaneFace(
-            topPlane.surface.id,
-            topZ,
-            outerTorus.params.sectionRadius,
-            innerTorus.params.sectionRadius,
-            topPlane.params.normal,
-        );
-
-        addBandFace(
-            outerCylinder.surface.id,
-            bottomZ,
-            outerCylinder.params.radius,
-            outerTorus.params.baseZ,
-            outerCylinder.params.radius,
-            outerCylinder.params.axis,
-        );
-        addBandFace(
-            innerCylinder.surface.id,
-            bottomZ,
-            innerCylinder.params.radius,
-            innerTorus.params.baseZ,
-            innerCylinder.params.radius,
-            innerCylinder.params.axis,
-        );
-        addBandFace(
-            outerTorus.surface.id,
-            outerTorus.params.baseZ,
-            outerTorus.params.baseRadius,
-            outerTorus.params.sectionZ,
-            outerTorus.params.sectionRadius,
-            outerTorus.params.axis,
-        );
-        addBandFace(
-            innerTorus.surface.id,
-            innerTorus.params.baseZ,
-            innerTorus.params.baseRadius,
-            innerTorus.params.sectionZ,
-            innerTorus.params.sectionRadius,
-            innerTorus.params.axis,
-        );
+        addTwoBoundaryFace(bottomPlane.surface.id, bottomOuter, bottomInner);
+        addTwoBoundaryFace(topPlane.surface.id, topOuter, topInner);
+        addTwoBoundaryFace(outerCylinder.surface.id, bottomOuter, shoulderOuter);
+        addTwoBoundaryFace(innerCylinder.surface.id, shoulderInner, bottomInner);
+        addTwoBoundaryFace(outerTorus.surface.id, shoulderOuter, topOuter);
+        addTwoBoundaryFace(innerTorus.surface.id, topInner, shoulderInner);
 
         return { faces, loops, edges, curves, extraVertices };
     }
