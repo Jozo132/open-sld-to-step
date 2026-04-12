@@ -472,6 +472,66 @@ describe('ParasolidParser', () => {
         expect(edges.every(edge => geometry.get(edge.geometryLikeId)?.type === 31)).toBe(true);
     });
 
+    it('extends the compact geometry index with type-32 and type-38 records', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const base = parser.parseCompactGeometryRecords();
+            const extended = parser.parseCompactGeometryLikeRecords();
+
+            expect(extended.length).toBeGreaterThanOrEqual(base.length);
+            expect(new Set(extended.map(record => record.id)).size).toBe(extended.length);
+            expect(extended.every(record => [30, 31, 32, 38].includes(record.type))).toBe(true);
+        }
+    });
+
+    it('improves CTC_05 edge geometry resolution through the extended compact index', () => {
+        if (!hasSamples) return;
+        const targetPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ctc_05_asme1_rd_sw1802.sldprt',
+        );
+        if (!targetPath) return;
+
+        const buf = readFileSync(targetPath);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const edges = parser.parseEdgeRecords();
+        const base = new Set(parser.parseCompactGeometryRecords().map(record => record.id));
+        const extended = new Map(parser.parseCompactGeometryLikeRecords().map(record => [record.id, record]));
+
+        const baseResolved = edges.filter(edge => base.has(edge.geometryLikeId)).length;
+        const extendedResolved = edges.filter(edge => extended.has(edge.geometryLikeId)).length;
+
+        expect(baseResolved).toBe(295);
+        expect(extendedResolved).toBe(326);
+        expect(extended.get(1358)).toMatchObject({ type: 38, refIds: [1359, 1360, 1350, 1], markerByte: 0x2b });
+        expect(extended.get(1396)).toMatchObject({ type: 38, refIds: [1495, 1487, 1496, 1], markerByte: 0x2b });
+    });
+
+    it('captures the type-32 geometry-like branch in CTC_01', () => {
+        if (!ctc01Path) return;
+
+        const buf = readFileSync(ctc01Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const extended = new Map(parser.parseCompactGeometryLikeRecords().map(record => [record.id, record]));
+
+        expect(extended.get(1569)).toMatchObject({ type: 32, refIds: [1565, 1978, 3500, 1], markerByte: 0x2b });
+        expect(extended.get(3434)).toMatchObject({ type: 32, refIds: [3436, 3430, 3437, 1], markerByte: 0x2b });
+    });
+
     it('finds entity classes in a real transmit file', () => {
         if (!hasSamples) return;
         const buf = readFileSync(sampleFiles[0]);

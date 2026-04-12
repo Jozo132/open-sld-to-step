@@ -271,6 +271,9 @@ export interface PsCompactGeometryRecord {
     markerByte: number;
 }
 
+/** Dominant compact record family keyed by four refs plus a geometry marker. */
+export interface PsCompactGeometryLikeRecord extends PsCompactGeometryRecord {}
+
 /** Decoded type-29 point record found in the post-sentinel gap. */
 export interface PsGapPointRecord {
     /** Byte offset of the preceding sentinel. */
@@ -313,6 +316,7 @@ const ENTITY_EDGE = 0x10;      // EDGE — connects two vertices via a curve
 const ENTITY_FACE = 0x0f;      // FACE — bounded surface with loops
 const ENTITY_SURFACE = 0x1e;   // SURFACE/CURVE — geometry with float64 params
 const ENTITY_BSPLINE = 0x1f;   // B-SPLINE curve/surface
+const ENTITY_GEOM_AUX = 0x26;  // Auxiliary compact geometry-like record with structured payload
 const ENTITY_SHELL = 0x11;     // BODY/REGION/SHELL container
 const ENTITY_LOOP = 0x13;      // LOOP — ordered set of coedges
 const ENTITY_ATTRIB = 0x20;    // ATTRIB/TRANSFORM — additional surface geometry
@@ -776,12 +780,24 @@ export class ParasolidParser {
 
     /** Decode the dominant compact type-30/type-31 geometry record layout. */
     parseCompactGeometryRecords(): PsCompactGeometryRecord[] {
+        return this.parseCompactGeometryFamilyRecords(new Set([ENTITY_SURFACE, ENTITY_BSPLINE]));
+    }
+
+    /** Decode the broader compact geometry-like family used by edge geometry links. */
+    parseCompactGeometryLikeRecords(): PsCompactGeometryLikeRecord[] {
+        return this.parseCompactGeometryFamilyRecords(
+            new Set([ENTITY_SURFACE, ENTITY_BSPLINE, ENTITY_ATTRIB, ENTITY_GEOM_AUX]),
+        );
+    }
+
+    /** Decode compact record families that use four leading refs plus a marker. @internal */
+    private parseCompactGeometryFamilyRecords(allowedTypes: Set<number>): PsCompactGeometryLikeRecord[] {
         const records: PsCompactGeometryRecord[] = [];
 
         for (let offset = 0; offset + 19 <= this.buf.length; offset++) {
             const type = this.buf[offset + 1];
             if (this.buf[offset] !== 0x00) continue;
-            if (type !== ENTITY_SURFACE && type !== ENTITY_BSPLINE) continue;
+            if (!allowedTypes.has(type)) continue;
 
             const header = this.parseLinearEntityHeader(offset, this.buf.length);
             if (!header || header.format !== 'compact') continue;
