@@ -844,6 +844,24 @@ export class ParasolidParser {
         return hits;
     }
 
+    /** Collect per-face unique edge-hit counts that can act as loop-complexity budgets. */
+    private buildRawFaceBoundaryBudgets(): number[] {
+        const hits = this.parseFaceEdgeHits();
+        if (hits.length === 0) return [];
+
+        const edgeIdsByFace = new Map<number, Set<number>>();
+        for (const hit of hits) {
+            const bucket = edgeIdsByFace.get(hit.faceId) ?? new Set<number>();
+            bucket.add(hit.edgeId);
+            edgeIdsByFace.set(hit.faceId, bucket);
+        }
+
+        return [...edgeIdsByFace.values()]
+            .map((edgeIds) => edgeIds.size)
+            .filter((count) => count >= 3)
+            .sort((a, b) => b - a);
+    }
+
     /** Recover ordered type-16 components from the observed prev/next links. */
     parseEdgeComponents(): PsEdgeComponent[] {
         const edges = this.parseEdgeRecords();
@@ -1112,6 +1130,48 @@ export class ParasolidParser {
         });
 
         return positions;
+    }
+
+    /** Consume the closest smaller raw boundary budget for a loop, if available. @internal */
+    private static takeClosestBoundaryBudget(loopSize: number, budgets: number[]): number | null {
+        let bestIndex = -1;
+        let bestDelta = Infinity;
+
+        for (let index = 0; index < budgets.length; index++) {
+            const budget = budgets[index];
+            if (budget < 3 || budget >= loopSize) continue;
+
+            const delta = loopSize - budget;
+            if (delta < 2) continue;
+            if (delta < bestDelta) {
+                bestDelta = delta;
+                bestIndex = index;
+            }
+        }
+
+        if (bestIndex < 0) return null;
+        const [budget] = budgets.splice(bestIndex, 1);
+        return budget ?? null;
+    }
+
+    /** Evenly decimate an ordered cycle to a smaller number of representatives. @internal */
+    private static decimateOrderedCycle<T>(items: T[], targetCount: number): T[] {
+        if (targetCount < 3 || targetCount >= items.length) return items;
+
+        const picked = new Set<number>();
+        const result: T[] = [];
+
+        for (let i = 0; i < targetCount; i++) {
+            let index = Math.floor(((i + 0.5) * items.length) / targetCount);
+            if (index >= items.length) index = items.length - 1;
+            while (picked.has(index) && index + 1 < items.length) index++;
+            while (picked.has(index) && index - 1 >= 0) index--;
+            if (picked.has(index)) continue;
+            picked.add(index);
+            result.push(items[index]);
+        }
+
+        return result.length >= 3 ? result : items;
     }
 
     /** Decode type-29 gap point records that immediately follow sentinels. */
@@ -3089,6 +3149,7 @@ export class ParasolidParser {
         surfaces: PsSurface[],
         vertices: PsVertex[],
         vertexSurfaceMap: Map<number, number[]>,
+        rawFaceEdgeBudgets: number[] = [],
     ): {
         faces: PsFace[];
         loops: PsLoop[];
@@ -3168,13 +3229,19 @@ export class ParasolidParser {
                 });
                 if (sorted.length < 3) continue;
 
+                const budget = ParasolidParser.takeClosestBoundaryBudget(sorted.length, rawFaceEdgeBudgets);
+                const boundaryPts = budget !== null
+                    ? ParasolidParser.decimateOrderedCycle(sorted, budget)
+                    : sorted;
+                if (boundaryPts.length < 3) continue;
+
                 // Create outer loop from angle-sorted polygon
                 const outerLoopEdges: number[] = [];
                 const outerLoopSenses: boolean[] = [];
 
-                for (let hi = 0; hi < sorted.length; hi++) {
-                    const startIdx = sorted[hi].idx;
-                    const endIdx = sorted[(hi + 1) % sorted.length].idx;
+                for (let hi = 0; hi < boundaryPts.length; hi++) {
+                    const startIdx = boundaryPts[hi].idx;
+                    const endIdx = boundaryPts[(hi + 1) % boundaryPts.length].idx;
                     const sv = vertices[startIdx];
                     const ev = vertices[endIdx];
 
@@ -3346,14 +3413,19 @@ export class ParasolidParser {
             });
             cylPts.sort((a, b) => a.angle - b.angle);
 
+            const cylBudget = ParasolidParser.takeClosestBoundaryBudget(cylPts.length, rawFaceEdgeBudgets);
+            const boundaryCylPts = cylBudget !== null
+                ? ParasolidParser.decimateOrderedCycle(cylPts, cylBudget)
+                : cylPts;
+
             // Build edge loop through all associated vertices
             const outerLoopEdges: number[] = [];
             const outerLoopSenses: boolean[] = [];
 
-            if (cylPts.length >= 3) {
-                for (let ci = 0; ci < cylPts.length; ci++) {
-                    const startIdx = cylPts[ci].idx;
-                    const endIdx = cylPts[(ci + 1) % cylPts.length].idx;
+            if (boundaryCylPts.length >= 3) {
+                for (let ci = 0; ci < boundaryCylPts.length; ci++) {
+                    const startIdx = boundaryCylPts[ci].idx;
+                    const endIdx = boundaryCylPts[(ci + 1) % boundaryCylPts.length].idx;
                     const sv = vertices[startIdx];
                     const ev = vertices[endIdx];
 
@@ -3491,13 +3563,18 @@ export class ParasolidParser {
             });
             conePts.sort((a, b) => a.angle - b.angle);
 
+            const coneBudget = ParasolidParser.takeClosestBoundaryBudget(conePts.length, rawFaceEdgeBudgets);
+            const boundaryConePts = coneBudget !== null
+                ? ParasolidParser.decimateOrderedCycle(conePts, coneBudget)
+                : conePts;
+
             const outerLoopEdges: number[] = [];
             const outerLoopSenses: boolean[] = [];
 
-            if (conePts.length >= 3) {
-                for (let ci = 0; ci < conePts.length; ci++) {
-                    const startIdx = conePts[ci].idx;
-                    const endIdx = conePts[(ci + 1) % conePts.length].idx;
+            if (boundaryConePts.length >= 3) {
+                for (let ci = 0; ci < boundaryConePts.length; ci++) {
+                    const startIdx = boundaryConePts[ci].idx;
+                    const endIdx = boundaryConePts[(ci + 1) % boundaryConePts.length].idx;
                     const sv = vertices[startIdx];
                     const ev = vertices[endIdx];
 
@@ -3680,10 +3757,11 @@ export class ParasolidParser {
 
         // ── Vertex-surface association and bounded topology ─────────────
         const vertexSurfaceMap = this.associateVertices(surfaces, vertices);
+        const rawFaceEdgeBudgets = this.buildRawFaceBoundaryBudgets();
 
         const {
             faces, loops, edges, curves, extraVertices,
-        } = this.buildBoundedTopology(surfaces, vertices, vertexSurfaceMap);
+        } = this.buildBoundedTopology(surfaces, vertices, vertexSurfaceMap, rawFaceEdgeBudgets);
 
         // Add any extra vertices created for cylinder seam points
         vertices.push(...extraVertices);
