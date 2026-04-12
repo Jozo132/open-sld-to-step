@@ -273,6 +273,14 @@ export interface PsFaceRecord {
     secondaryRefId: number;
     /** Embedded shell id when the [00 11][id][00 01] marker is present. */
     shellId: number | null;
+    /** Optional coedge anchor observed at byte offset 24 in many face payloads. */
+    coedgeAnchorAId: number | null;
+    /** Optional edge anchor observed at byte offset 28 in many face payloads. */
+    edgeAnchorAId: number | null;
+    /** Optional coedge anchor observed at byte offset 70 in many face payloads. */
+    coedgeAnchorBId: number | null;
+    /** Optional edge anchor observed at byte offset 74 in many face payloads. */
+    edgeAnchorBId: number | null;
     /** Total raw payload size after the type/id header. */
     dataLength: number;
 }
@@ -745,6 +753,9 @@ export class ParasolidParser {
 
     /** Decode minimal raw face records from sentinel-block sub-record entities. */
     parseFaceRecords(): PsFaceRecord[] {
+        const coedgeIds = new Set(this.parseCoedgeRecords().map((record) => record.id));
+        const edgeIds = new Set(this.parseEdgeRecords().map((record) => record.id));
+
         return this.extractAllEntities()
             .filter((entity) => entity.type === ENTITY_FACE && entity.data.length >= 12)
             .map((entity) => {
@@ -753,6 +764,18 @@ export class ParasolidParser {
                     entity.data.readUInt16BE(16) === 1
                     ? entity.data.readUInt16BE(14)
                     : null;
+                const coedgeAnchorAId = entity.data.length >= 26
+                    ? entity.data.readUInt16BE(24)
+                    : 0;
+                const edgeAnchorAId = entity.data.length >= 30
+                    ? entity.data.readUInt16BE(28)
+                    : 0;
+                const coedgeAnchorBId = entity.data.length >= 72
+                    ? entity.data.readUInt16BE(70)
+                    : 0;
+                const edgeAnchorBId = entity.data.length >= 76
+                    ? entity.data.readUInt16BE(74)
+                    : 0;
 
                 return {
                     offset: entity.offset,
@@ -763,6 +786,10 @@ export class ParasolidParser {
                     geometryLikeId: entity.data.readUInt16BE(8),
                     secondaryRefId: entity.data.readUInt16BE(10),
                     shellId,
+                    coedgeAnchorAId: coedgeIds.has(coedgeAnchorAId) ? coedgeAnchorAId : null,
+                    edgeAnchorAId: edgeIds.has(edgeAnchorAId) ? edgeAnchorAId : null,
+                    coedgeAnchorBId: coedgeIds.has(coedgeAnchorBId) ? coedgeAnchorBId : null,
+                    edgeAnchorBId: edgeIds.has(edgeAnchorBId) ? edgeAnchorBId : null,
                     dataLength: entity.data.length,
                 };
             });

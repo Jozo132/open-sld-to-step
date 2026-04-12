@@ -378,7 +378,14 @@ describe('ParasolidParser', () => {
             expect(faces.every(record => record.primary === false)).toBe(true);
 
             if (faces.length === 0) continue;
-            expect(faces.some(record => record.shellId !== null || record.secondaryRefId !== 1)).toBe(true);
+            expect(
+                faces.some(record =>
+                    record.shellId !== null ||
+                    record.secondaryRefId !== 1 ||
+                    record.coedgeAnchorAId !== null ||
+                    record.edgeAnchorAId !== null,
+                ),
+            ).toBe(true);
         }
     });
 
@@ -402,6 +409,10 @@ describe('ParasolidParser', () => {
             geometryLikeId: 1905,
             secondaryRefId: 1,
             shellId: 3716,
+            coedgeAnchorAId: 507,
+            edgeAnchorAId: 1111,
+            coedgeAnchorBId: 213,
+            edgeAnchorBId: 1662,
             dataLength: 2063,
         });
     });
@@ -428,6 +439,10 @@ describe('ParasolidParser', () => {
             geometryLikeId: 4669,
             secondaryRefId: 1,
             shellId: 1005,
+            coedgeAnchorAId: 1003,
+            edgeAnchorAId: 4616,
+            coedgeAnchorBId: 1000,
+            edgeAnchorBId: 2504,
             dataLength: 114,
         });
         expect(faces.get(4836)).toMatchObject({
@@ -437,6 +452,10 @@ describe('ParasolidParser', () => {
             geometryLikeId: 4837,
             secondaryRefId: 1,
             shellId: 1038,
+            coedgeAnchorAId: 1036,
+            edgeAnchorAId: 4731,
+            coedgeAnchorBId: 1039,
+            edgeAnchorBId: 4694,
             dataLength: 222,
         });
         expect(faces.get(5016)).toMatchObject({
@@ -446,6 +465,10 @@ describe('ParasolidParser', () => {
             geometryLikeId: 5017,
             secondaryRefId: 1,
             shellId: 1086,
+            coedgeAnchorAId: 1084,
+            edgeAnchorAId: 1248,
+            coedgeAnchorBId: 1081,
+            edgeAnchorBId: 4940,
             dataLength: 114,
         });
     });
