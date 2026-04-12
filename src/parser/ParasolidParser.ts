@@ -173,6 +173,44 @@ export interface PsSentinelAlignedEntity {
     refs: number[];
 }
 
+/** Decoded compact type-18 record from the sentinel-aligned topology chain. */
+export interface PsCoedgeRecord {
+    /** Byte offset of the terminating sentinel. */
+    sentinelOffset: number;
+    /** Raw coedge entity id. */
+    id: number;
+    /** Raw flags field. */
+    flags: number;
+    /** First reference, currently observed as a curve/edge-like link. */
+    curveLikeId: number;
+    /** Previous coedge in the global doubly-linked chain. */
+    prevCoedgeId: number;
+    /** Next coedge in the global doubly-linked chain. */
+    nextCoedgeId: number;
+    /** Vertex/point-like reference carried by the coedge. */
+    vertexPointId: number;
+}
+
+/** Decoded type-29 point record found in the post-sentinel gap. */
+export interface PsGapPointRecord {
+    /** Byte offset of the preceding sentinel. */
+    sentinelOffset: number;
+    /** Byte offset of the 0x0003 gap separator. */
+    separatorOffset: number;
+    /** Raw point entity id. */
+    id: number;
+    /** Raw flags field. */
+    flags: number;
+    /** Next coedge-like reference carried by the point record. */
+    nextCoedgeId: number;
+    /** Next point in the linked point chain. */
+    nextPointId: number;
+    /** Previous point in the linked point chain. */
+    prevPointId: number;
+    /** Best-effort float64 triplet preserved from the trailing payload. */
+    position: PsPoint;
+}
+
 /** Marker bytes at the start of every entity record of type A. */
 const RECORD_MARKER_P = 0x70; // '=p'
 /** Marker bytes at the start of every entity record of type B. */
@@ -472,6 +510,33 @@ export class ParasolidParser {
         }
 
         return entities;
+    }
+
+    /** Decode compact type-18 records from the sentinel-aligned record pass. */
+    parseCoedgeRecords(): PsCoedgeRecord[] {
+        return this.parseSentinelAlignedEntities()
+            .filter((entity) => entity.role === 'terminator' && entity.header.type === 18 && entity.refs.length >= 4)
+            .map((entity) => ({
+                sentinelOffset: entity.sentinelOffset,
+                id: entity.header.id,
+                flags: entity.header.flags,
+                curveLikeId: entity.refs[0],
+                prevCoedgeId: entity.refs[1],
+                nextCoedgeId: entity.refs[2],
+                vertexPointId: entity.refs[3],
+            }));
+    }
+
+    /** Decode type-29 gap point records that immediately follow sentinels. */
+    parseGapPointRecords(): PsGapPointRecord[] {
+        const records: PsGapPointRecord[] = [];
+
+        for (const sentinelOffset of this.findEightByteSentinelOffsets()) {
+            const record = this.parseGapPointRecordAfterSentinel(sentinelOffset);
+            if (record) records.push(record);
+        }
+
+        return records;
     }
 
     /**
@@ -1001,6 +1066,34 @@ export class ParasolidParser {
         }
 
         return refs;
+    }
+
+    /** Decode a type-29 gap point record immediately after a sentinel. @internal */
+    private parseGapPointRecordAfterSentinel(sentinelOffset: number): PsGapPointRecord | null {
+        const separatorOffset = sentinelOffset + SENTINEL_8.length;
+        const headerOffset = separatorOffset + 2;
+        const recordEnd = headerOffset + 40;
+        if (recordEnd > this.buf.length) return null;
+        if (this.buf.readUInt16BE(separatorOffset) !== 0x0003) return null;
+
+        const header = this.parseLinearEntityHeader(headerOffset, headerOffset + 10);
+        if (!header || header.format !== 'compact' || header.type !== ENTITY_POINT) return null;
+
+        const x = this.buf.readDoubleBE(headerOffset + 18);
+        const y = this.buf.readDoubleBE(headerOffset + 26);
+        const z = this.buf.readDoubleBE(headerOffset + 34);
+        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return null;
+
+        return {
+            sentinelOffset,
+            separatorOffset,
+            id: header.id,
+            flags: header.flags,
+            nextCoedgeId: this.buf.readUInt16BE(headerOffset + 10),
+            nextPointId: this.buf.readUInt16BE(headerOffset + 12),
+            prevPointId: this.buf.readUInt16BE(headerOffset + 14),
+            position: { x, y, z },
+        };
     }
 
     /** Compact pre-sentinel header: [00 type] [id:2] [00 00] [flags:2] [00 01]. @internal */

@@ -32,6 +32,9 @@ function findSldprtFiles(dir: string): string[] {
 const sampleFiles = findSldprtFiles(DOWNLOADS_DIR);
 const hasSamples = sampleFiles.length > 0;
 const describeWithSamples = hasSamples ? describe : describe.skip;
+const ctc01Path = sampleFiles.find(filePath =>
+    basename(filePath).toLowerCase() === 'nist_ctc_01_asme1_rd_sw1802.sldprt',
+);
 const ctc04Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ctc_04_asme1_rd_sw1802.sldprt',
 );
@@ -158,12 +161,9 @@ describe('ParasolidParser', () => {
 
     it('finds both compact and packed sentinel record forms in CTC_01', () => {
         if (!hasSamples) return;
-        const targetPath = sampleFiles.find(filePath =>
-            basename(filePath).toLowerCase() === 'nist_ctc_01_asme1_rd_sw1802.sldprt',
-        );
-        if (!targetPath) return;
+        if (!ctc01Path) return;
 
-        const buf = readFileSync(targetPath);
+        const buf = readFileSync(ctc01Path);
         const extraction = SldprtContainerParser.extractParasolid(buf);
         expect(extraction).not.toBeNull();
         if (!extraction) return;
@@ -173,6 +173,67 @@ describe('ParasolidParser', () => {
 
         expect(records.some(record => record.role === 'embedded-data' && record.header.type === 16)).toBe(true);
         expect(records.some(record => record.role === 'terminator' && record.header.type === 18)).toBe(true);
+    });
+
+    it('decodes coedge and gap-point linkage across NIST samples', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const coedges = parser.parseCoedgeRecords();
+            const points = parser.parseGapPointRecords();
+            const coedgeIds = new Set(coedges.map(record => record.id));
+            const pointIds = new Set(points.map(record => record.id));
+            const prevResolved = coedges.filter(record => coedgeIds.has(record.prevCoedgeId)).length;
+            const nextResolved = coedges.filter(record => coedgeIds.has(record.nextCoedgeId)).length;
+            const vertexResolved = coedges.filter(record => pointIds.has(record.vertexPointId)).length;
+
+            expect(coedgeIds.size).toBe(coedges.length);
+            expect(pointIds.size).toBe(points.length);
+
+            if (basename(filePath).toLowerCase() === 'nist_ftc_11_asme1_rb_sw1802.sldprt') {
+                expect(coedges).toHaveLength(0);
+                expect(points).toHaveLength(0);
+                continue;
+            }
+
+            expect(coedges.length).toBeGreaterThan(0);
+            expect(points.length).toBeGreaterThan(0);
+            expect(prevResolved).toBe(coedges.length - 1);
+            expect(nextResolved).toBe(coedges.length - 1);
+            expect(vertexResolved).toBe(points.length);
+        }
+    });
+
+    it('stabilizes the first decoded CTC_01 coedge and point links', () => {
+        if (!ctc01Path) return;
+
+        const buf = readFileSync(ctc01Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const coedges = parser.parseCoedgeRecords();
+        const points = parser.parseGapPointRecords();
+
+        expect(coedges.slice(0, 4)).toMatchObject([
+            { id: 52, curveLikeId: 59, prevCoedgeId: 14, nextCoedgeId: 60, vertexPointId: 46 },
+            { id: 60, curveLikeId: 67, prevCoedgeId: 52, nextCoedgeId: 68, vertexPointId: 69 },
+            { id: 68, curveLikeId: 72, prevCoedgeId: 60, nextCoedgeId: 73, vertexPointId: 70 },
+            { id: 73, curveLikeId: 75, prevCoedgeId: 68, nextCoedgeId: 76, vertexPointId: 71 },
+        ]);
+        expect(points.slice(0, 4)).toMatchObject([
+            { id: 46, nextCoedgeId: 52, nextPointId: 69, prevPointId: 11 },
+            { id: 71, nextCoedgeId: 73, nextPointId: 74, prevPointId: 70 },
+            { id: 74, nextCoedgeId: 76, nextPointId: 77, prevPointId: 71 },
+            { id: 77, nextCoedgeId: 79, nextPointId: 80, prevPointId: 74 },
+        ]);
     });
 
     it('finds entity classes in a real transmit file', () => {
