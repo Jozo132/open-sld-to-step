@@ -661,6 +661,54 @@ export class ParasolidParser {
     }
 
     /**
+     * Read ALL valid geometry marker results from an entity data buffer.
+     * Unlike readGeomFloats (which picks the single "best" marker), this
+     * returns every 0x2B/0x2D marker that produces ≥11 floats with a valid
+     * cylinder/cone signature (positive radius, unit-ish axis).
+     *
+     * This handles entities that contain multiple concatenated geometries,
+     * e.g., a sentinel block sub-record that packs two cylinder definitions
+     * separated by embedded sub-entity headers.
+     * @internal
+     */
+    private static readAllGeomMarkers(data: Buffer): Array<{ floats: number[]; marker: number }> {
+        const results: Array<{ floats: number[]; marker: number }> = [];
+        const seenRadii = new Set<number>();
+
+        for (const marker of [0x2b, 0x2d] as const) {
+            let markerIdx = -1;
+            while ((markerIdx = data.indexOf(marker, markerIdx + 1)) >= 0) {
+                if (markerIdx + 1 + 8 > data.length) continue;
+
+                const floats: number[] = [];
+                for (let off = markerIdx + 1; off + 8 <= data.length; off += 8) {
+                    const val = data.readDoubleBE(off);
+                    if (!isFinite(val) || Math.abs(val) > 1e6) break;
+                    floats.push(val);
+                }
+                if (floats.length < 11) continue;
+
+                // Validate cylinder/cone signature
+                const axisMag = Math.sqrt(
+                    floats[3] * floats[3] + floats[4] * floats[4] + floats[5] * floats[5],
+                );
+                if (axisMag < 0.5 || axisMag > 1.5) continue;
+                const radius = floats[9];
+                if (radius <= 0 || radius > 1e4) continue;
+
+                // Deduplicate by radius (rounded to avoid floating-point noise)
+                const rKey = Math.round(radius * 1e8);
+                if (seenRadii.has(rKey)) continue;
+                seenRadii.add(rKey);
+
+                results.push({ floats, marker });
+            }
+        }
+
+        return results;
+    }
+
+    /**
      * Extract cylinder/cone surfaces from type-0x1F (SURFACE/BSPLINE) entities.
      * These are the reliably identifiable surfaces from the binary stream.
      *
@@ -678,19 +726,19 @@ export class ParasolidParser {
         let nextId = 1;
 
         // ── Type 0x1F entities → cylinders, cones ───────────────────────
+        // Some entities contain multiple concatenated geometries (e.g., two
+        // cylinders packed in one sentinel block sub-record). Use
+        // readAllGeomMarkers to extract ALL valid geometry from each entity.
         const surfEntities = allEntities.filter(e => e.type === ENTITY_BSPLINE);
         for (const ent of surfEntities) {
-            const result = ParasolidParser.readGeomFloats(ent.data);
-            if (!result || result.floats.length < 11) continue;
-            const floats = result.floats;
+            const markerResults = ParasolidParser.readAllGeomMarkers(ent.data);
+            for (const result of markerResults) {
+                const floats = result.floats;
 
-            if (floats.length >= 11) {
                 const origin: PsPoint = { x: floats[0], y: floats[1], z: floats[2] };
                 const axis: PsPoint = { x: floats[3], y: floats[4], z: floats[5] };
                 const radius = floats[9];
                 const semiAngle = floats[10];
-
-                if (radius <= 0 || radius > 1e4) continue;
 
                 const sOrigin: PsPoint = {
                     x: origin.x * PS_TO_MM,
@@ -992,6 +1040,61 @@ export class ParasolidParser {
         return filtered.length >= 3 ? filtered : vertices;
     }
 
+    // ── PCA eigenvalue ratio for LINE/PLANE discrimination ─────────────
+
+    /**
+     * Compute the PCA eigenvalue ratio (λ1/λ2) of 2D-projected vertices
+     * on a plane. A low ratio (close to 1) means 2D spread → PLANE.
+     * A high ratio (> threshold) means collinear → LINE curve.
+     *
+     * @returns λ1/λ2, or Infinity if points are perfectly collinear.
+     * @internal
+     */
+    private static computeEigenvalueRatio(
+        coplanarVertices: PsPoint[],
+        normal: PsPoint,
+    ): number {
+        if (coplanarVertices.length < 3) return Infinity;
+
+        const { uAxis, vAxis } = ParasolidParser.planeBasis(normal);
+
+        // Project to 2D
+        const pts = coplanarVertices.map(v => ({
+            u: v.x * uAxis.x + v.y * uAxis.y + v.z * uAxis.z,
+            v: v.x * vAxis.x + v.y * vAxis.y + v.z * vAxis.z,
+        }));
+
+        // Compute centroid
+        let cu = 0, cv = 0;
+        for (const p of pts) { cu += p.u; cv += p.v; }
+        cu /= pts.length;
+        cv /= pts.length;
+
+        // Compute 2×2 covariance matrix
+        let cov00 = 0, cov01 = 0, cov11 = 0;
+        for (const p of pts) {
+            const du = p.u - cu, dv = p.v - cv;
+            cov00 += du * du;
+            cov01 += du * dv;
+            cov11 += dv * dv;
+        }
+        cov00 /= pts.length;
+        cov01 /= pts.length;
+        cov11 /= pts.length;
+
+        // Eigenvalues of symmetric 2×2: λ = (trace ± √(trace² − 4·det)) / 2
+        const trace = cov00 + cov11;
+        const det = cov00 * cov11 - cov01 * cov01;
+        const disc = trace * trace - 4 * det;
+        if (disc < 0) return 1; // shouldn't happen for symmetric
+        const sqrtDisc = Math.sqrt(disc);
+        const lambda1 = (trace + sqrtDisc) / 2;
+        const lambda2 = (trace - sqrtDisc) / 2;
+
+        if (lambda2 < 1e-10) return Infinity; // perfectly collinear
+        return lambda1 / lambda2;
+    }
+
     // ── Surface deduplication ────────────────────────────────────────────────
 
     /**
@@ -1005,6 +1108,17 @@ export class ParasolidParser {
     private static readonly CYL_ORIGIN_TOL = 0.5;   // mm — axis line distance
     private static readonly CYL_RADIUS_TOL = 0.01;  // mm
     private static readonly VERTEX_CYL_TOL = 0.5;   // mm — vertex on cylinder
+
+    /**
+     * Maximum PCA eigenvalue ratio (λ1/λ2) for a candidate plane to be
+     * accepted. Vertices of a TRUE plane spread in 2D (low ratio ≈ 1–2.4),
+     * while LINE curve vertices are collinear (high ratio > 2.6 or Infinity).
+     *
+     * Validated on CTC_01: all 29 true planes have ratio ≤ 2.36,
+     * all 14 false positives (LINE curves) have ratio ≥ 2.60.
+     * Clean-room analysis of public-domain NIST test files.
+     */
+    private static readonly PLANE_EIGEN_RATIO_MAX = 2.5;
 
     /**
      * Deduplicate surfaces with the same geometric equation.
@@ -1838,21 +1952,27 @@ export class ParasolidParser {
         const extractedSurfaces = this.extractSurfaces();
 
         // ── Step 2: Validate candidate planes from type-0x1E entities ───
-        // Only keep planes with ≥3 coplanar vertices (filters out LINE curves)
+        // Keep planes with ≥3 coplanar vertices AND passing PCA eigenvalue
+        // ratio test (2D spread → plane, 1D collinear → LINE curve).
         const validatedSurfaces: PsSurface[] = [];
         for (const surf of extractedSurfaces) {
             if (surf.surfaceType === 'plane') {
                 const p = surf.params as { origin: PsPoint; normal: PsPoint };
-                let coplanarCount = 0;
+                const coplanarVerts: PsPoint[] = [];
                 for (const v of vertices) {
                     const dx = v.position.x - p.origin.x;
                     const dy = v.position.y - p.origin.y;
                     const dz = v.position.z - p.origin.z;
                     const dist = Math.abs(dx * p.normal.x + dy * p.normal.y + dz * p.normal.z);
-                    if (dist < ParasolidParser.VERTEX_PLANE_TOL) coplanarCount++;
-                    if (coplanarCount >= 3) break; // early exit
+                    if (dist < ParasolidParser.VERTEX_PLANE_TOL) coplanarVerts.push(v.position);
                 }
-                if (coplanarCount >= 3) validatedSurfaces.push(surf);
+                if (coplanarVerts.length < 3) continue;
+
+                // PCA eigenvalue ratio: low → 2D spread (PLANE), high → collinear (LINE)
+                const ratio = ParasolidParser.computeEigenvalueRatio(coplanarVerts, p.normal);
+                if (ratio <= ParasolidParser.PLANE_EIGEN_RATIO_MAX) {
+                    validatedSurfaces.push(surf);
+                }
             } else {
                 validatedSurfaces.push(surf); // cylinders, cones → keep
             }
