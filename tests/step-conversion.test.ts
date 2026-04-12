@@ -105,6 +105,31 @@ describe('ParasolidParser', () => {
         expect(metadata.metadataEndOffset).toBeGreaterThan(metadata.schemaTerminatorOffset);
         expect(metadata.firstSentinelOffset).not.toBeNull();
         expect((metadata.firstSentinelOffset ?? 0)).toBeGreaterThan(metadata.metadataEndOffset);
+        expect(metadata.firstEntityHeader).not.toBeNull();
+    });
+
+    it('detects the first pre-sentinel entity record across NIST samples', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const metadata = parser.parseSchemaMetadata();
+
+            expect(metadata).not.toBeNull();
+            if (!metadata) continue;
+
+            expect(metadata.firstSentinelOffset).not.toBeNull();
+            expect(metadata.firstEntityOffset).not.toBeNull();
+            expect(metadata.firstEntityHeader).not.toBeNull();
+            expect(metadata.firstEntityHeader?.offset).toBe(metadata.firstEntityOffset);
+            expect(metadata.firstEntityOffset!).toBeLessThan(metadata.firstSentinelOffset!);
+            expect(metadata.firstEntityOffset!).toBeGreaterThanOrEqual(metadata.metadataEndOffset);
+        }
     });
 
     it('finds entity classes in a real transmit file', () => {

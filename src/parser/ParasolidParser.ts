@@ -135,12 +135,30 @@ export interface PsSchemaMetadata {
     metadataEndOffset: number;
     /** First detected pre-sentinel entity header, if present. */
     firstEntityOffset: number | null;
+    /** Decoded first pre-sentinel entity header, if present. */
+    firstEntityHeader: PsLinearEntityHeader | null;
     /** First sentinel offset, if a sentinel zone exists. */
     firstSentinelOffset: number | null;
     /** Parsed field-layout tokens from the schema block. */
     fieldDefinitions: PsSchemaFieldDefinition[];
     /** Parsed named class definitions from the class catalogue. */
     namedClasses: PsNamedClassDefinition[];
+}
+
+/** Decoded linear entity header before the sentinel-block zone. */
+export interface PsLinearEntityHeader {
+    /** Byte offset where the header starts. */
+    offset: number;
+    /** Observed header encoding variant. */
+    format: 'compact' | 'packed';
+    /** Raw entity type byte from the header. */
+    type: number;
+    /** Raw entity id extracted from the header. */
+    id: number;
+    /** Raw flags uint16 extracted from the header. */
+    flags: number;
+    /** Header trailer uint16 for packed records; null for compact records. */
+    trailer: number | null;
 }
 
 /** Marker bytes at the start of every entity record of type A. */
@@ -329,10 +347,12 @@ export class ParasolidParser {
             }
         }
 
-        const firstEntityOffset = this.findFirstLinearRecordOffset(
+        const firstEntityHeader = this.findFirstLinearEntityHeader(
             metadataEndOffset,
             schemaRegionEnd,
+            firstSentinelOffset >= 0 ? firstSentinelOffset : null,
         );
+        const firstEntityOffset = firstEntityHeader?.offset ?? null;
 
         return {
             schemaId,
@@ -340,6 +360,7 @@ export class ParasolidParser {
             schemaTerminatorOffset,
             metadataEndOffset,
             firstEntityOffset,
+            firstEntityHeader,
             firstSentinelOffset: firstSentinelOffset >= 0 ? firstSentinelOffset : null,
             fieldDefinitions,
             namedClasses,
@@ -643,21 +664,14 @@ export class ParasolidParser {
         const points: PsPoint[] = [];
         const seen = new Set<string>();
 
-        // Skip past the header + schema + class definitions. Only trust the
-        // decoded metadata envelope when it also yields a plausible first
-        // entity header; some files (notably FTC_11) have valid packed data
-        // between the class catalogue and the first sentinel, and a hard cut
-        // at metadataEndOffset would skip that region.
+        // Skip past the header + schema + class definitions using the stable
+        // last-'Z' heuristic for now. The schema metadata decoder is still
+        // observational and is not yet trusted to drive the raw float scan.
         let dataStart = 0x400;  // Conservative default
-        const schemaMetadata = this.parseSchemaMetadata();
-        if (schemaMetadata && schemaMetadata.firstEntityOffset !== null) {
-            dataStart = Math.max(dataStart, schemaMetadata.metadataEndOffset);
-        } else {
-            for (let i = Math.min(0x1000, buf.length) - 1; i >= 0x60; i--) {
-                if (buf[i] === 0x5a) { // 'Z' — schema end marker
-                    dataStart = i + 1;
-                    break;
-                }
+        for (let i = Math.min(0x1000, buf.length) - 1; i >= 0x60; i--) {
+            if (buf[i] === 0x5a) { // 'Z' — schema end marker
+                dataStart = i + 1;
+                break;
             }
         }
 
@@ -848,12 +862,59 @@ export class ParasolidParser {
     }
 
     /** Find the first plausible linear entity header between metadata and the sentinel zone. @internal */
-    private findFirstLinearRecordOffset(start: number, end: number): number | null {
-        for (let offset = start; offset + 16 <= end; offset++) {
-            if (this.isCompactLinearRecord(offset, end) || this.isPackedLinearRecord(offset, end)) {
-                return offset;
+    private findFirstLinearEntityHeader(
+        start: number,
+        end: number,
+        firstSentinelOffset: number | null,
+    ): PsLinearEntityHeader | null {
+        for (let offset = start; offset + 10 <= end; offset++) {
+            const header = this.parseLinearEntityHeader(offset, end);
+            if (header) {
+                return header;
             }
         }
+
+        if (firstSentinelOffset !== null) {
+            const packedOffset = firstSentinelOffset - 11;
+            if (packedOffset >= start) {
+                const header = this.parseLinearEntityHeader(packedOffset, firstSentinelOffset);
+                if (header) return header;
+            }
+
+            const compactOffset = firstSentinelOffset - 10;
+            if (compactOffset >= start) {
+                const header = this.parseLinearEntityHeader(compactOffset, firstSentinelOffset);
+                if (header) return header;
+            }
+        }
+
+        return null;
+    }
+
+    /** Decode a compact or packed linear entity header if one starts at offset. @internal */
+    private parseLinearEntityHeader(offset: number, end: number): PsLinearEntityHeader | null {
+        if (this.isCompactLinearRecord(offset, end)) {
+            return {
+                offset,
+                format: 'compact',
+                type: this.buf[offset + 1],
+                id: this.buf.readUInt16BE(offset + 2),
+                flags: this.buf.readUInt16BE(offset + 6),
+                trailer: null,
+            };
+        }
+
+        if (this.isPackedLinearRecord(offset, end)) {
+            return {
+                offset,
+                format: 'packed',
+                type: this.buf[offset + 1],
+                id: this.buf.readUInt16BE(offset + 3),
+                flags: this.buf.readUInt16BE(offset + 7),
+                trailer: this.buf.readUInt16BE(offset + 9),
+            };
+        }
+
         return null;
     }
 
@@ -871,13 +932,23 @@ export class ParasolidParser {
 
     /** Packed FF-style header observed before the sentinel zone. @internal */
     private isPackedLinearRecord(offset: number, end: number): boolean {
-        if (offset + 16 > end) return false;
+        // Minimal packed header layout observed before the first sentinel:
+        // [00 type] [FF] [id:2] [00 00] [flags:2] [00 01]
+        if (offset + 11 > end) return false;
         if (this.buf[offset] !== 0x00 || this.buf[offset + 2] !== 0xff) return false;
         const type = this.buf[offset + 1];
         if (type < 0x0f || type > 0x90) return false;
         const id = this.buf.readUInt16BE(offset + 3);
         if (id === 0 || id > 10000) return false;
         if (this.buf[offset + 5] !== 0x00 || this.buf[offset + 6] !== 0x00) return false;
+        const trailer = this.buf.readUInt16BE(offset + 9);
+        const hasSmallTrailer = trailer > 0 && trailer <= 0x0400;
+        if (!hasSmallTrailer) return false;
+
+        // Many first records end immediately at the sentinel. When extra bytes
+        // are present, use them as a confidence boost rather than a hard
+        // requirement so metadata tracing still works on the short header form.
+        if (offset + 16 > end) return true;
 
         let smallRefs = 0;
         for (let refOffset = offset + 8; refOffset < offset + 16; refOffset += 2) {
