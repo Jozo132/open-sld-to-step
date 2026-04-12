@@ -862,6 +862,11 @@ export class ParasolidParser {
             .sort((a, b) => b - a);
     }
 
+    /** Build a stable key for a heuristic boundary candidate. @internal */
+    private static buildBoundaryBudgetKey(surfaceType: string, surfaceId: number, variant = 0): string {
+        return `${surfaceType}:${surfaceId}:${variant}`;
+    }
+
     /** Recover ordered type-16 components from the observed prev/next links. */
     parseEdgeComponents(): PsEdgeComponent[] {
         const edges = this.parseEdgeRecords();
@@ -1132,28 +1137,6 @@ export class ParasolidParser {
         return positions;
     }
 
-    /** Consume the closest smaller raw boundary budget for a loop, if available. @internal */
-    private static takeClosestBoundaryBudget(loopSize: number, budgets: number[]): number | null {
-        let bestIndex = -1;
-        let bestDelta = Infinity;
-
-        for (let index = 0; index < budgets.length; index++) {
-            const budget = budgets[index];
-            if (budget < 3 || budget >= loopSize) continue;
-
-            const delta = loopSize - budget;
-            if (delta < 2) continue;
-            if (delta < bestDelta) {
-                bestDelta = delta;
-                bestIndex = index;
-            }
-        }
-
-        if (bestIndex < 0) return null;
-        const [budget] = budgets.splice(bestIndex, 1);
-        return budget ?? null;
-    }
-
     /** Evenly decimate an ordered cycle to a smaller number of representatives. @internal */
     private static decimateOrderedCycle<T>(items: T[], targetCount: number): T[] {
         if (targetCount < 3 || targetCount >= items.length) return items;
@@ -1172,6 +1155,153 @@ export class ParasolidParser {
         }
 
         return result.length >= 3 ? result : items;
+    }
+
+    /** Project plane-associated vertices into sorted boundary clusters. @internal */
+    private buildPlaneBoundaryClusters(
+        origin: PsPoint,
+        normal: PsPoint,
+        assocIndices: number[],
+        vertices: PsVertex[],
+    ): Array<Array<{ u: number; v: number; idx: number }>> {
+        if (assocIndices.length < 3) return [];
+
+        const { uAxis, vAxis } = ParasolidParser.planeBasis(normal);
+        const pts2D = assocIndices.map((index) => {
+            const vertex = vertices[index].position;
+            const dx = vertex.x - origin.x;
+            const dy = vertex.y - origin.y;
+            const dz = vertex.z - origin.z;
+            return {
+                u: dx * uAxis.x + dy * uAxis.y + dz * uAxis.z,
+                v: dx * vAxis.x + dy * vAxis.y + dz * vAxis.z,
+                idx: index,
+            };
+        });
+
+        let uMin = Infinity;
+        let uMax = -Infinity;
+        let vMin = Infinity;
+        let vMax = -Infinity;
+        for (const point of pts2D) {
+            if (point.u < uMin) uMin = point.u;
+            if (point.u > uMax) uMax = point.u;
+            if (point.v < vMin) vMin = point.v;
+            if (point.v > vMax) vMax = point.v;
+        }
+
+        const bboxDiag = Math.sqrt((uMax - uMin) ** 2 + (vMax - vMin) ** 2);
+        const clusterThreshold = Math.max(60, bboxDiag / 3);
+        const clusters = ParasolidParser.clusterPoints2D(pts2D, clusterThreshold);
+
+        return clusters
+            .map((cluster) => {
+                if (cluster.length < 3) return [];
+                const centroidU = cluster.reduce((sum, point) => sum + point.u, 0) / cluster.length;
+                const centroidV = cluster.reduce((sum, point) => sum + point.v, 0) / cluster.length;
+                return cluster.slice().sort((left, right) => {
+                    return Math.atan2(left.v - centroidV, left.u - centroidU)
+                        - Math.atan2(right.v - centroidV, right.u - centroidU);
+                });
+            })
+            .filter((cluster) => cluster.length >= 3);
+    }
+
+    /** Order associated surface vertices by angle around an axis. @internal */
+    private buildAngularBoundaryPoints(
+        origin: PsPoint,
+        axis: PsPoint,
+        assocIndices: number[],
+        vertices: PsVertex[],
+    ): Array<{ idx: number; angle: number }> {
+        if (assocIndices.length < 3) return [];
+
+        const { uAxis, vAxis } = ParasolidParser.planeBasis(axis);
+        return assocIndices
+            .map((index) => {
+                const vertex = vertices[index].position;
+                const dx = vertex.x - origin.x;
+                const dy = vertex.y - origin.y;
+                const dz = vertex.z - origin.z;
+                const u = dx * uAxis.x + dy * uAxis.y + dz * uAxis.z;
+                const w = dx * vAxis.x + dy * vAxis.y + dz * vAxis.z;
+                return { idx: index, angle: Math.atan2(w, u) };
+            })
+            .sort((left, right) => left.angle - right.angle);
+    }
+
+    /** Plan raw face-edge budgets against heuristic loop candidates before emitting topology. @internal */
+    private planRawFaceBoundaryTargets(
+        surfaces: PsSurface[],
+        vertices: PsVertex[],
+        vertexSurfaceMap: Map<number, number[]>,
+        rawFaceEdgeBudgets: number[],
+    ): Map<string, number> {
+        if (rawFaceEdgeBudgets.length === 0) return new Map();
+
+        const candidates: Array<{ key: string; loopSize: number }> = [];
+
+        for (const surf of surfaces) {
+            const assocIndices = vertexSurfaceMap.get(surf.id) ?? [];
+            const params = surf.params as Record<string, unknown>;
+
+            if (surf.surfaceType === 'plane') {
+                const origin = params.origin as PsPoint;
+                const normal = params.normal as PsPoint;
+                const clusters = this.buildPlaneBoundaryClusters(origin, normal, assocIndices, vertices);
+
+                clusters.forEach((cluster, clusterIndex) => {
+                    candidates.push({
+                        key: ParasolidParser.buildBoundaryBudgetKey('plane', surf.id, clusterIndex),
+                        loopSize: cluster.length,
+                    });
+                });
+                continue;
+            }
+
+            if (surf.surfaceType === 'cylinder' || surf.surfaceType === 'cone') {
+                const origin = params.origin as PsPoint;
+                const axis = params.axis as PsPoint;
+                const ordered = this.buildAngularBoundaryPoints(origin, axis, assocIndices, vertices);
+                if (ordered.length >= 3) {
+                    candidates.push({
+                        key: ParasolidParser.buildBoundaryBudgetKey(surf.surfaceType, surf.id),
+                        loopSize: ordered.length,
+                    });
+                }
+            }
+        }
+
+        const targets = new Map<string, number>();
+        const available = candidates.slice();
+
+        const reserveCandidate = (budget: number, allowDecimation: boolean): void => {
+            let bestIndex = -1;
+            let bestDelta = Infinity;
+
+            for (let index = 0; index < available.length; index++) {
+                const candidate = available[index];
+                const delta = candidate.loopSize - budget;
+
+                if (delta < 0) continue;
+                if (!allowDecimation && delta !== 0) continue;
+                if (allowDecimation && (delta < 2 || delta > 3)) continue;
+
+                if (delta < bestDelta) {
+                    bestDelta = delta;
+                    bestIndex = index;
+                }
+            }
+
+            if (bestIndex < 0) return;
+            const [candidate] = available.splice(bestIndex, 1);
+            targets.set(candidate.key, budget);
+        };
+
+        for (const budget of rawFaceEdgeBudgets) reserveCandidate(budget, false);
+        for (const budget of rawFaceEdgeBudgets) reserveCandidate(budget, true);
+
+        return targets;
     }
 
     /** Decode type-29 gap point records that immediately follow sentinels. */
@@ -3165,6 +3295,12 @@ export class ParasolidParser {
         const edges: PsEdge[] = [];
         const curves: PsCurve[] = [];
         const extraVertices: PsVertex[] = [];
+        const boundaryBudgetTargets = this.planRawFaceBoundaryTargets(
+            surfaces,
+            vertices,
+            vertexSurfaceMap,
+            rawFaceEdgeBudgets,
+        );
 
         let nextFaceId = 1;
         let nextLoopId = 1;
@@ -3188,51 +3324,15 @@ export class ParasolidParser {
             const origin = p.origin as PsPoint;
             const normal = p.normal as PsPoint;
             const { uAxis, vAxis } = ParasolidParser.planeBasis(normal);
+            const clusters = this.buildPlaneBoundaryClusters(origin, normal, assocIndices, vertices);
 
-            // Project vertices to 2D
-            const pts2D = assocIndices.map(i => {
-                const v = vertices[i].position;
-                const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
-                return {
-                    u: dx * uAxis.x + dy * uAxis.y + dz * uAxis.z,
-                    v: dx * vAxis.x + dy * vAxis.y + dz * vAxis.z,
-                    idx: i,
-                };
-            });
-
-            // Adaptive clustering threshold: use the bounding box diagonal
-            // of all 2D-projected vertices to scale the threshold.
-            // Large faces (big bbox) get a large threshold so perimeter
-            // vertices stay in one cluster.  Small features keep ~60 mm.
-            let uMin = Infinity, uMax = -Infinity, vMin = Infinity, vMax = -Infinity;
-            for (const p2 of pts2D) {
-                if (p2.u < uMin) uMin = p2.u;
-                if (p2.u > uMax) uMax = p2.u;
-                if (p2.v < vMin) vMin = p2.v;
-                if (p2.v > vMax) vMax = p2.v;
-            }
-            const bboxDiag = Math.sqrt((uMax - uMin) ** 2 + (vMax - vMin) ** 2);
-            const clusterThreshold = Math.max(60, bboxDiag / 3);
-            const clusters = ParasolidParser.clusterPoints2D(pts2D, clusterThreshold);
-
-            for (const cluster of clusters) {
-                if (cluster.length < 3) continue;
-
-                // Sort ALL cluster vertices by angle from centroid for a
-                // closed polygon.  This gives a more representative centroid
-                // than convex-hull-only vertices (which shifts outward for
-                // concave shapes).
-                const cu = cluster.reduce((s, p) => s + p.u, 0) / cluster.length;
-                const cv = cluster.reduce((s, p) => s + p.v, 0) / cluster.length;
-                const sorted = cluster.slice().sort((a, b) => {
-                    return Math.atan2(a.v - cv, a.u - cu) - Math.atan2(b.v - cv, b.u - cu);
-                });
-                if (sorted.length < 3) continue;
-
-                const budget = ParasolidParser.takeClosestBoundaryBudget(sorted.length, rawFaceEdgeBudgets);
-                const boundaryPts = budget !== null
-                    ? ParasolidParser.decimateOrderedCycle(sorted, budget)
-                    : sorted;
+            for (const [clusterIndex, cluster] of clusters.entries()) {
+                const targetSize = boundaryBudgetTargets.get(
+                    ParasolidParser.buildBoundaryBudgetKey('plane', surf.id, clusterIndex),
+                );
+                const boundaryPts = targetSize !== undefined
+                    ? ParasolidParser.decimateOrderedCycle(cluster, targetSize)
+                    : cluster;
                 if (boundaryPts.length < 3) continue;
 
                 // Create outer loop from angle-sorted polygon
@@ -3321,7 +3421,7 @@ export class ParasolidParser {
 
                     // Check if cylinder center projection falls inside this face's
                     // actual boundary (angular-sorted polygon, not convex hull)
-                    if (!ParasolidParser.isPointInPolygon(sorted, pu, pv)) continue;
+                    if (!ParasolidParser.isPointInPolygon(boundaryPts, pu, pv)) continue;
 
                     // Create circle inner loop at the intersection
                     const circleCenter: PsPoint = { x: projX, y: projY, z: projZ };
@@ -3404,18 +3504,12 @@ export class ParasolidParser {
             // cylinder axis for the outer loop.  This gives a representative
             // centroid (close to axis midpoint) instead of the biased seam
             // centroid that is offset by radius.
-            const cylPts = assocIndices.map(i => {
-                const v = vertices[i].position;
-                const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
-                const u = dx * uAxis.x + dy * uAxis.y + dz * uAxis.z;
-                const w = dx * vAxis.x + dy * vAxis.y + dz * vAxis.z;
-                return { idx: i, angle: Math.atan2(w, u) };
-            });
-            cylPts.sort((a, b) => a.angle - b.angle);
-
-            const cylBudget = ParasolidParser.takeClosestBoundaryBudget(cylPts.length, rawFaceEdgeBudgets);
-            const boundaryCylPts = cylBudget !== null
-                ? ParasolidParser.decimateOrderedCycle(cylPts, cylBudget)
+            const cylPts = this.buildAngularBoundaryPoints(origin, axis, assocIndices, vertices);
+            const cylTargetSize = boundaryBudgetTargets.get(
+                ParasolidParser.buildBoundaryBudgetKey('cylinder', surf.id),
+            );
+            const boundaryCylPts = cylTargetSize !== undefined
+                ? ParasolidParser.decimateOrderedCycle(cylPts, cylTargetSize)
                 : cylPts;
 
             // Build edge loop through all associated vertices
@@ -3554,18 +3648,12 @@ export class ParasolidParser {
             const topRadius = Math.max(0, radius + hMax * tanHA);
 
             // Use actual vertices sorted by angle for accurate centroid
-            const conePts = assocIndices.map(i => {
-                const v = vertices[i].position;
-                const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
-                const u = dx * uAxis.x + dy * uAxis.y + dz * uAxis.z;
-                const w = dx * vAxis.x + dy * vAxis.y + dz * vAxis.z;
-                return { idx: i, angle: Math.atan2(w, u) };
-            });
-            conePts.sort((a, b) => a.angle - b.angle);
-
-            const coneBudget = ParasolidParser.takeClosestBoundaryBudget(conePts.length, rawFaceEdgeBudgets);
-            const boundaryConePts = coneBudget !== null
-                ? ParasolidParser.decimateOrderedCycle(conePts, coneBudget)
+            const conePts = this.buildAngularBoundaryPoints(origin, axis, assocIndices, vertices);
+            const coneTargetSize = boundaryBudgetTargets.get(
+                ParasolidParser.buildBoundaryBudgetKey('cone', surf.id),
+            );
+            const boundaryConePts = coneTargetSize !== undefined
+                ? ParasolidParser.decimateOrderedCycle(conePts, coneTargetSize)
                 : conePts;
 
             const outerLoopEdges: number[] = [];
