@@ -255,6 +255,28 @@ export interface PsEdgeComponentChain {
     orderedComponents: PsEdgeComponent[];
 }
 
+/** Minimal raw face record decoded from sentinel-block sub-records. */
+export interface PsFaceRecord {
+    /** Byte offset of the underlying raw face entity. */
+    offset: number;
+    /** Whether the face was the primary entity of its sentinel block. */
+    primary: boolean;
+    /** Raw face entity id. */
+    id: number;
+    /** Raw face flags word from the prefix. */
+    flags: number;
+    /** First linked ref in the stable face prefix. */
+    primaryRefId: number;
+    /** Geometry-like ref in the stable face prefix. */
+    geometryLikeId: number;
+    /** Second linked ref in the stable face prefix. */
+    secondaryRefId: number;
+    /** Embedded shell id when the [00 11][id][00 01] marker is present. */
+    shellId: number | null;
+    /** Total raw payload size after the type/id header. */
+    dataLength: number;
+}
+
 /** Dominant compact type-30/type-31 record with four leading refs and a geometry marker. */
 export interface PsCompactGeometryRecord {
     /** Byte offset where the compact header starts. */
@@ -411,6 +433,10 @@ interface RawEntity {
     type: number;
     /** Entity ID (uint16 BE). */
     id: number;
+    /** Byte offset where the raw entity header begins. */
+    offset: number;
+    /** Whether the entity was the primary record within its sentinel block. */
+    primary: boolean;
     /** Raw data bytes after the type+id header. */
     data: Buffer;
 }
@@ -715,6 +741,31 @@ export class ParasolidParser {
         }
 
         return records;
+    }
+
+    /** Decode minimal raw face records from sentinel-block sub-record entities. */
+    parseFaceRecords(): PsFaceRecord[] {
+        return this.extractAllEntities()
+            .filter((entity) => entity.type === ENTITY_FACE && entity.data.length >= 12)
+            .map((entity) => {
+                const shellId = entity.data.length >= 18 &&
+                    entity.data.readUInt16BE(12) === ENTITY_SHELL &&
+                    entity.data.readUInt16BE(16) === 1
+                    ? entity.data.readUInt16BE(14)
+                    : null;
+
+                return {
+                    offset: entity.offset,
+                    primary: entity.primary,
+                    id: entity.id,
+                    flags: entity.data.readUInt16BE(2),
+                    primaryRefId: entity.data.readUInt16BE(6),
+                    geometryLikeId: entity.data.readUInt16BE(8),
+                    secondaryRefId: entity.data.readUInt16BE(10),
+                    shellId,
+                    dataLength: entity.data.length,
+                };
+            });
     }
 
     /** Recover ordered type-16 components from the observed prev/next links. */
@@ -1296,20 +1347,20 @@ export class ParasolidParser {
             if (block.length < 8) continue;
 
             // Split block by SUB_RECORD_SEP
-            const subRecords: Buffer[] = [];
+            const subRecords: Array<{ data: Buffer; offset: number }> = [];
             let searchStart = 0;
             while (true) {
                 const sepIdx = block.indexOf(SUB_RECORD_SEP, searchStart);
                 if (sepIdx < 0) {
-                    subRecords.push(block.subarray(searchStart));
+                    subRecords.push({ data: block.subarray(searchStart), offset: blockStart + searchStart });
                     break;
                 }
-                subRecords.push(block.subarray(searchStart, sepIdx));
+                subRecords.push({ data: block.subarray(searchStart, sepIdx), offset: blockStart + searchStart });
                 searchStart = sepIdx + SUB_RECORD_SEP.length;
             }
 
             for (let si = 0; si < subRecords.length; si++) {
-                const rec = subRecords[si];
+                const { data: rec, offset } = subRecords[si];
                 if (si === 0) {
                     // Primary entity: [00 00 00 03 00 TYPE ID_hi ID_lo]
                     if (rec.length < 8) continue;
@@ -1317,7 +1368,7 @@ export class ParasolidParser {
                     const type = rec[5];
                     if (type < 0x0d || type > 0x3f) continue;
                     const id = rec.readUInt16BE(6);
-                    entities.push({ type, id, data: rec.subarray(8) });
+                    entities.push({ type, id, offset, primary: true, data: rec.subarray(8) });
                 } else {
                     // Sub-record: [00 TYPE ID_hi ID_lo]
                     if (rec.length < 4) continue;
@@ -1325,7 +1376,7 @@ export class ParasolidParser {
                     const type = rec[1];
                     if (type < 0x0d || type > 0x3f) continue;
                     const id = rec.readUInt16BE(2);
-                    entities.push({ type, id, data: rec.subarray(4) });
+                    entities.push({ type, id, offset, primary: false, data: rec.subarray(4) });
                 }
             }
         }

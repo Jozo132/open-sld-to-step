@@ -361,6 +361,95 @@ describe('ParasolidParser', () => {
         expect(components[0].orderedEdges.map(record => record.id)).toEqual([49, 53, 57, 62, 65]);
     });
 
+    it('decodes minimal raw face records where sentinel-block face entities exist', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const faces = parser.parseFaceRecords();
+            expect(new Set(faces.map(record => record.id)).size).toBe(faces.length);
+            expect(faces.every(record => record.dataLength >= 12)).toBe(true);
+            expect(faces.every(record => record.geometryLikeId > 0)).toBe(true);
+            expect(faces.every(record => record.primary === false)).toBe(true);
+
+            if (faces.length === 0) continue;
+            expect(faces.some(record => record.shellId !== null || record.secondaryRefId !== 1)).toBe(true);
+        }
+    });
+
+    it('stabilizes the first decoded CTC_01 face record prefix', () => {
+        if (!ctc01Path) return;
+
+        const buf = readFileSync(ctc01Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const faces = parser.parseFaceRecords();
+
+        expect(faces).toHaveLength(1);
+        expect(faces[0]).toMatchObject({
+            id: 1915,
+            primary: false,
+            flags: 1790,
+            primaryRefId: 3716,
+            geometryLikeId: 1905,
+            secondaryRefId: 1,
+            shellId: 3716,
+            dataLength: 2063,
+        });
+    });
+
+    it('captures representative FTC_08 face record prefixes', () => {
+        if (!hasSamples) return;
+        const targetPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_08_asme1_rc_sw1802.sldprt',
+        );
+        if (!targetPath) return;
+
+        const buf = readFileSync(targetPath);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const faces = new Map(parser.parseFaceRecords().map(record => [record.id, record]));
+
+        expect(faces.get(4668)).toMatchObject({
+            primary: false,
+            flags: 9193,
+            primaryRefId: 2506,
+            geometryLikeId: 4669,
+            secondaryRefId: 1,
+            shellId: 1005,
+            dataLength: 114,
+        });
+        expect(faces.get(4836)).toMatchObject({
+            primary: false,
+            flags: 9165,
+            primaryRefId: 4832,
+            geometryLikeId: 4837,
+            secondaryRefId: 1,
+            shellId: 1038,
+            dataLength: 222,
+        });
+        expect(faces.get(5016)).toMatchObject({
+            primary: false,
+            flags: 9517,
+            primaryRefId: 4942,
+            geometryLikeId: 5017,
+            secondaryRefId: 1,
+            shellId: 1086,
+            dataLength: 114,
+        });
+    });
+
     it('reconstructs ordered type-16 component chains across NIST samples', () => {
         if (!hasSamples) return;
 
