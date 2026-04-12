@@ -473,6 +473,82 @@ describe('ParasolidParser', () => {
         });
     });
 
+    it('decodes aligned face-edge hits from raw face payloads', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const faces = parser.parseFaceRecords();
+            const hits = parser.parseFaceEdgeHits();
+            const faceIds = new Set(faces.map(record => record.id));
+            const edgeIds = new Set(parser.parseEdgeRecords().map(record => record.id));
+            const anchoredFaces = faces.filter(record => record.edgeAnchorAId !== null).length;
+
+            expect(hits.every(hit => hit.byteOffset % 2 === 0)).toBe(true);
+            expect(hits.every(hit => faceIds.has(hit.faceId))).toBe(true);
+            expect(hits.every(hit => edgeIds.has(hit.edgeId))).toBe(true);
+            expect(hits.length).toBeGreaterThanOrEqual(anchoredFaces);
+        }
+    });
+
+    it('stabilizes representative CTC_01 face-edge hits and chain positions', () => {
+        if (!ctc01Path) return;
+
+        const buf = readFileSync(ctc01Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const hits = parser.parseFaceEdgeHits().filter(hit => hit.faceId === 1915);
+
+        expect(hits.slice(0, 4)).toEqual([
+            { faceId: 1915, byteOffset: 28, edgeId: 1111, chainIndex: 0, componentIndex: 10, edgeIndex: 14, linearIndex: 208 },
+            { faceId: 1915, byteOffset: 74, edgeId: 1662, chainIndex: 0, componentIndex: 7, edgeIndex: 3, linearIndex: 152 },
+            { faceId: 1915, byteOffset: 90, edgeId: 769, chainIndex: 0, componentIndex: 11, edgeIndex: 134, linearIndex: 346 },
+            { faceId: 1915, byteOffset: 120, edgeId: 1395, chainIndex: 0, componentIndex: 7, edgeIndex: 0, linearIndex: 149 },
+        ]);
+    });
+
+    it('captures representative FTC_08 face-edge hit sequences', () => {
+        if (!hasSamples) return;
+        const targetPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_08_asme1_rc_sw1802.sldprt',
+        );
+        if (!targetPath) return;
+
+        const buf = readFileSync(targetPath);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const hits = parser.parseFaceEdgeHits();
+        const byFace = new Map<number, typeof hits>();
+        for (const hit of hits) {
+            const bucket = byFace.get(hit.faceId) ?? [];
+            bucket.push(hit);
+            byFace.set(hit.faceId, bucket);
+        }
+
+        expect(byFace.get(4668)?.slice(0, 4)).toEqual([
+            { faceId: 4668, byteOffset: 28, edgeId: 4616, chainIndex: 0, componentIndex: 0, edgeIndex: 540, linearIndex: 540 },
+            { faceId: 4668, byteOffset: 36, edgeId: 4356, chainIndex: 0, componentIndex: 0, edgeIndex: 349, linearIndex: 349 },
+            { faceId: 4668, byteOffset: 74, edgeId: 2504, chainIndex: 0, componentIndex: 0, edgeIndex: 579, linearIndex: 579 },
+            { faceId: 4668, byteOffset: 106, edgeId: 4589, chainIndex: 0, componentIndex: 0, edgeIndex: 539, linearIndex: 539 },
+        ]);
+        expect(byFace.get(6403)?.slice(0, 3)).toEqual([
+            { faceId: 6403, byteOffset: 28, edgeId: 3692, chainIndex: 0, componentIndex: 0, edgeIndex: 47, linearIndex: 47 },
+            { faceId: 6403, byteOffset: 74, edgeId: 2098, chainIndex: 0, componentIndex: 0, edgeIndex: 489, linearIndex: 489 },
+            { faceId: 6403, byteOffset: 106, edgeId: 2098, chainIndex: 0, componentIndex: 0, edgeIndex: 489, linearIndex: 489 },
+        ]);
+    });
+
     it('reconstructs ordered type-16 component chains across NIST samples', () => {
         if (!hasSamples) return;
 

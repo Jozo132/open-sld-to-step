@@ -285,6 +285,24 @@ export interface PsFaceRecord {
     dataLength: number;
 }
 
+/** Aligned edge id occurrence found inside a raw face payload. */
+export interface PsFaceEdgeHit {
+    /** Raw face entity id that owns the payload hit. */
+    faceId: number;
+    /** Byte offset within the face payload where the edge id was found. */
+    byteOffset: number;
+    /** Edge id referenced by the face payload. */
+    edgeId: number;
+    /** Ordered edge chain index when the edge participates in a decoded chain. */
+    chainIndex: number | null;
+    /** Ordered component index within the decoded chain. */
+    componentIndex: number | null;
+    /** Edge index within its ordered component. */
+    edgeIndex: number | null;
+    /** Flattened edge position across the ordered chain. */
+    linearIndex: number | null;
+}
+
 /** Dominant compact type-30/type-31 record with four leading refs and a geometry marker. */
 export interface PsCompactGeometryRecord {
     /** Byte offset where the compact header starts. */
@@ -795,6 +813,37 @@ export class ParasolidParser {
             });
     }
 
+    /** Decode aligned edge-id hits embedded in raw face payloads. */
+    parseFaceEdgeHits(): PsFaceEdgeHit[] {
+        const edgeIds = new Set(this.parseEdgeRecords().map((record) => record.id));
+        if (edgeIds.size === 0) return [];
+
+        const edgePositions = this.buildEdgeChainPositionMap();
+        const hits: PsFaceEdgeHit[] = [];
+
+        for (const entity of this.extractAllEntities()) {
+            if (entity.type !== ENTITY_FACE) continue;
+
+            for (let byteOffset = 0; byteOffset + 2 <= entity.data.length; byteOffset += 2) {
+                const edgeId = entity.data.readUInt16BE(byteOffset);
+                if (!edgeIds.has(edgeId)) continue;
+
+                const position = edgePositions.get(edgeId);
+                hits.push({
+                    faceId: entity.id,
+                    byteOffset,
+                    edgeId,
+                    chainIndex: position?.chainIndex ?? null,
+                    componentIndex: position?.componentIndex ?? null,
+                    edgeIndex: position?.edgeIndex ?? null,
+                    linearIndex: position?.linearIndex ?? null,
+                });
+            }
+        }
+
+        return hits;
+    }
+
     /** Recover ordered type-16 components from the observed prev/next links. */
     parseEdgeComponents(): PsEdgeComponent[] {
         const edges = this.parseEdgeRecords();
@@ -1046,6 +1095,23 @@ export class ParasolidParser {
         }
 
         return records;
+    }
+
+    /** Build a position map for edges that participate in ordered component chains. @internal */
+    private buildEdgeChainPositionMap(): Map<number, { chainIndex: number; componentIndex: number; edgeIndex: number; linearIndex: number }> {
+        const positions = new Map<number, { chainIndex: number; componentIndex: number; edgeIndex: number; linearIndex: number }>();
+
+        this.parseEdgeComponentChains().forEach((chain, chainIndex) => {
+            let linearIndex = 0;
+            chain.orderedComponents.forEach((component, componentIndex) => {
+                component.orderedEdges.forEach((edge, edgeIndex) => {
+                    positions.set(edge.id, { chainIndex, componentIndex, edgeIndex, linearIndex });
+                    linearIndex++;
+                });
+            });
+        });
+
+        return positions;
     }
 
     /** Decode type-29 gap point records that immediately follow sentinels. */

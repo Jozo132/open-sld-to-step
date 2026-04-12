@@ -54,6 +54,7 @@ export type {
     PsEdgeComponent,
     PsEdgeComponentChain,
     PsFaceRecord,
+    PsFaceEdgeHit,
     PsCompactGeometryRecord,
     PsCompactGeometryLikeRecord,
     PsPackedGeometryLikeRecord,
