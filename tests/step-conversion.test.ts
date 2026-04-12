@@ -487,7 +487,7 @@ describe('ParasolidParser', () => {
 
             expect(extended.length).toBeGreaterThanOrEqual(base.length);
             expect(new Set(extended.map(record => record.id)).size).toBe(extended.length);
-            expect(extended.every(record => [30, 31, 32, 38].includes(record.type))).toBe(true);
+            expect(extended.every(record => [30, 31, 32, 38, 134].includes(record.type))).toBe(true);
         }
     });
 
@@ -532,6 +532,26 @@ describe('ParasolidParser', () => {
         expect(extended.get(3434)).toMatchObject({ type: 32, refIds: [3436, 3430, 3437, 1], markerByte: 0x2b });
     });
 
+    it('captures the FTC_07 compact type-134 geometry-like chain', () => {
+        if (!hasSamples) return;
+        const targetPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_07_asme1_rd_sw1802.sldprt',
+        );
+        if (!targetPath) return;
+
+        const buf = readFileSync(targetPath);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const extended = new Map(parser.parseCompactGeometryLikeRecords().map(record => [record.id, record]));
+
+        expect(extended.get(1780)).toMatchObject({ type: 134, refIds: [1618, 1766, 1788, 1], markerByte: 0x2b });
+        expect(extended.get(1788)).toMatchObject({ type: 134, refIds: [1795, 1780, 1796, 1], markerByte: 0x2d });
+        expect(extended.get(1836)).toMatchObject({ type: 134, refIds: [1843, 1828, 1844, 1], markerByte: 0x2d });
+    });
+
     it('decodes packed geometry-like records for unresolved edge targets', () => {
         if (!hasSamples) return;
 
@@ -569,7 +589,7 @@ describe('ParasolidParser', () => {
 
             expect(combinedResolved).toBeGreaterThanOrEqual(compactResolved);
             if (basename(filePath).toLowerCase() === 'nist_ftc_07_asme1_rd_sw1802.sldprt') {
-                expect(combinedResolved).toBe(560);
+                expect(combinedResolved).toBe(584);
                 continue;
             }
         }

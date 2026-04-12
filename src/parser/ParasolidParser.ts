@@ -335,6 +335,7 @@ const ENTITY_FACE = 0x0f;      // FACE — bounded surface with loops
 const ENTITY_SURFACE = 0x1e;   // SURFACE/CURVE — geometry with float64 params
 const ENTITY_BSPLINE = 0x1f;   // B-SPLINE curve/surface
 const ENTITY_GEOM_AUX = 0x26;  // Auxiliary compact geometry-like record with structured payload
+const ENTITY_GEOM_CHAIN = 0x86; // Observed FTC_07 compact geometry-like chain variant
 const ENTITY_SHELL = 0x11;     // BODY/REGION/SHELL container
 const ENTITY_LOOP = 0x13;      // LOOP — ordered set of coedges
 const ENTITY_ATTRIB = 0x20;    // ATTRIB/TRANSFORM — additional surface geometry
@@ -804,7 +805,7 @@ export class ParasolidParser {
     /** Decode the broader compact geometry-like family used by edge geometry links. */
     parseCompactGeometryLikeRecords(): PsCompactGeometryLikeRecord[] {
         return this.parseCompactGeometryFamilyRecords(
-            new Set([ENTITY_SURFACE, ENTITY_BSPLINE, ENTITY_ATTRIB, ENTITY_GEOM_AUX]),
+            new Set([ENTITY_SURFACE, ENTITY_BSPLINE, ENTITY_ATTRIB, ENTITY_GEOM_AUX, ENTITY_GEOM_CHAIN]),
         );
     }
 
