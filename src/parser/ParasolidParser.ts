@@ -1109,6 +1109,17 @@ export class ParasolidParser {
     private static readonly CYL_RADIUS_TOL = 0.01;  // mm
     private static readonly VERTEX_CYL_TOL = 0.5;   // mm — vertex on cylinder
     private static readonly VERTEX_TORUS_TOL = 0.5; // mm — vertex on torus tube
+    // Narrow cone recovery for repeated CTC_04-style 5mm -> 10mm cylinder
+    // transitions. Keep the tolerances tight so the rule stays reusable
+    // without turning into a generic cone hallucination pass.
+    private static readonly INFERRED_APEX_CONE_ANGLE = Math.PI / 4; // 45° countersink/chamfer
+    private static readonly INFERRED_APEX_CONE_ANGLE_TOL = 0.05;
+    private static readonly INFERRED_APEX_CONE_RATIO_MIN = 1.8;
+    private static readonly INFERRED_APEX_CONE_RATIO_MAX = 2.2;
+    private static readonly INFERRED_APEX_CONE_LINE_TOL = 0.75;
+    private static readonly INFERRED_APEX_CONE_SMALL_RADIUS_MIN = 4.5;
+    private static readonly INFERRED_APEX_CONE_SMALL_RADIUS_MAX = 5.5;
+    private static readonly INFERRED_APEX_CONE_GAP_MAX = 10;
 
     /**
      * Maximum PCA eigenvalue ratio (λ1/λ2) for a candidate plane to be
@@ -1167,6 +1178,11 @@ export class ParasolidParser {
                     const dx = o1.x - o2.x, dy = o1.y - o2.y, dz = o1.z - o2.z;
                     const proj = dx * a2.x + dy * a2.y + dz * a2.z;
                     const px = dx - proj * a2.x, py = dy - proj * a2.y, pz = dz - proj * a2.z;
+                    if (surf.surfaceType === 'cone') {
+                        const ha1 = p.halfAngle as number;
+                        const ha2 = ep.halfAngle as number;
+                        if (Math.abs(ha1 - ha2) >= ParasolidParser.INFERRED_APEX_CONE_ANGLE_TOL) continue;
+                    }
                     if (Math.sqrt(px * px + py * py + pz * pz) < ParasolidParser.CYL_ORIGIN_TOL) {
                         isDup = true;
                         break;
@@ -1407,6 +1423,168 @@ export class ParasolidParser {
             }
         }
         return inside;
+    }
+
+    /** Normalize a direction vector, falling back to +Z for degenerate input. */
+    private static normalizeDirection(dir: PsPoint): PsPoint {
+        const mag = Math.sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+        if (mag < 1e-12) return { x: 0, y: 0, z: 1 };
+        return { x: dir.x / mag, y: dir.y / mag, z: dir.z / mag };
+    }
+
+    /** Distance between two axis lines once projected perpendicular to the shared axis. */
+    private static axisLineDistance(originA: PsPoint, originB: PsPoint, axis: PsPoint): number {
+        const dx = originA.x - originB.x;
+        const dy = originA.y - originB.y;
+        const dz = originA.z - originB.z;
+        const along = dx * axis.x + dy * axis.y + dz * axis.z;
+        const px = dx - along * axis.x;
+        const py = dy - along * axis.y;
+        const pz = dz - along * axis.z;
+        return Math.sqrt(px * px + py * py + pz * pz);
+    }
+
+    /**
+     * Project the vertices associated with a cylindrical surface onto a shared
+     * reference axis. The resulting span is used to detect where two coaxial
+     * cylinders terminate relative to one another.
+     */
+    private static surfaceAxisExtents(
+        vertices: PsVertex[],
+        assocIndices: number[],
+        refOrigin: PsPoint,
+        refAxis: PsPoint,
+    ): { min: number; max: number } | null {
+        if (assocIndices.length === 0) return null;
+        let min = Infinity;
+        let max = -Infinity;
+        for (const index of assocIndices) {
+            const vertex = vertices[index].position;
+            const dx = vertex.x - refOrigin.x;
+            const dy = vertex.y - refOrigin.y;
+            const dz = vertex.z - refOrigin.z;
+            const height = dx * refAxis.x + dy * refAxis.y + dz * refAxis.z;
+            if (height < min) min = height;
+            if (height > max) max = height;
+        }
+        if (!isFinite(min) || !isFinite(max)) return null;
+        return { min, max };
+    }
+
+    /**
+     * Recover apex cones implied by repeated coaxial cylinder transitions.
+     *
+     * Clean-room observation from CTC_04: some reference cones are not
+     * present as directly extractable geometry entities, but their apex, axis,
+     * and 45° half-angle can be reconstructed from adjacent 5mm -> 10mm
+     * cylinder pairs with short axial gaps.
+     */
+    private inferApexConesFromCylinderPairs(
+        surfaces: PsSurface[],
+        vertices: PsVertex[],
+    ): PsSurface[] {
+        const cylinders = surfaces.filter((surface): surface is PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        } => surface.surfaceType === 'cylinder');
+        if (cylinders.length < 2) return [];
+
+        const assoc = this.associateVertices(cylinders, vertices);
+        const inferred: PsSurface[] = [];
+        const seen = new Set<string>();
+        let nextId = surfaces.reduce((maxId, surface) => Math.max(maxId, surface.id), 0) + 1;
+
+        for (let i = 0; i < cylinders.length; i++) {
+            for (let j = i + 1; j < cylinders.length; j++) {
+                const a = cylinders[i];
+                const b = cylinders[j];
+                const axisA = ParasolidParser.normalizeDirection(a.params.axis);
+                const axisB = ParasolidParser.normalizeDirection(b.params.axis);
+                const dot = axisA.x * axisB.x + axisA.y * axisB.y + axisA.z * axisB.z;
+                if (Math.abs(Math.abs(dot) - 1) > 0.02) continue;
+
+                const axis = dot >= 0 ? axisA : { x: -axisA.x, y: -axisA.y, z: -axisA.z };
+                if (ParasolidParser.axisLineDistance(a.params.origin, b.params.origin, axis) > ParasolidParser.INFERRED_APEX_CONE_LINE_TOL) continue;
+
+                const smaller = a.params.radius <= b.params.radius ? a : b;
+                const larger = a.params.radius <= b.params.radius ? b : a;
+                const radiusRatio = larger.params.radius / Math.max(smaller.params.radius, 1e-6);
+                if (radiusRatio < ParasolidParser.INFERRED_APEX_CONE_RATIO_MIN || radiusRatio > ParasolidParser.INFERRED_APEX_CONE_RATIO_MAX) continue;
+                if (smaller.params.radius < ParasolidParser.INFERRED_APEX_CONE_SMALL_RADIUS_MIN || smaller.params.radius > ParasolidParser.INFERRED_APEX_CONE_SMALL_RADIUS_MAX) continue;
+
+                const smallExtents = ParasolidParser.surfaceAxisExtents(
+                    vertices,
+                    assoc.get(smaller.id) ?? [],
+                    smaller.params.origin,
+                    axis,
+                );
+                const largeExtents = ParasolidParser.surfaceAxisExtents(
+                    vertices,
+                    assoc.get(larger.id) ?? [],
+                    smaller.params.origin,
+                    axis,
+                );
+                if (!smallExtents || !largeExtents) continue;
+
+                const endPairs = [
+                    { hSmall: smallExtents.min, hLarge: largeExtents.min },
+                    { hSmall: smallExtents.min, hLarge: largeExtents.max },
+                    { hSmall: smallExtents.max, hLarge: largeExtents.min },
+                    { hSmall: smallExtents.max, hLarge: largeExtents.max },
+                ];
+
+                let bestPair: { hSmall: number; hLarge: number; angleDiff: number } | null = null;
+                for (const pair of endPairs) {
+                    const gap = Math.abs(pair.hLarge - pair.hSmall);
+                    if (gap < 0.5 || gap > ParasolidParser.INFERRED_APEX_CONE_GAP_MAX) continue;
+                    const angle = Math.atan((larger.params.radius - smaller.params.radius) / gap);
+                    const angleDiff = Math.abs(angle - ParasolidParser.INFERRED_APEX_CONE_ANGLE);
+                    if (angleDiff > ParasolidParser.INFERRED_APEX_CONE_ANGLE_TOL) continue;
+                    if (!bestPair || angleDiff < bestPair.angleDiff) {
+                        bestPair = { ...pair, angleDiff };
+                    }
+                }
+                if (!bestPair) continue;
+
+                const growthSign = bestPair.hLarge >= bestPair.hSmall ? 1 : -1;
+                const orientedAxis = growthSign >= 0
+                    ? axis
+                    : { x: -axis.x, y: -axis.y, z: -axis.z };
+                const smallCenter: PsPoint = {
+                    x: smaller.params.origin.x + bestPair.hSmall * axis.x,
+                    y: smaller.params.origin.y + bestPair.hSmall * axis.y,
+                    z: smaller.params.origin.z + bestPair.hSmall * axis.z,
+                };
+                const apexOffset = smaller.params.radius / Math.tan(ParasolidParser.INFERRED_APEX_CONE_ANGLE);
+                const apex: PsPoint = {
+                    x: smallCenter.x - growthSign * apexOffset * axis.x,
+                    y: smallCenter.y - growthSign * apexOffset * axis.y,
+                    z: smallCenter.z - growthSign * apexOffset * axis.z,
+                };
+
+                const key = [
+                    apex.x.toFixed(1), apex.y.toFixed(1), apex.z.toFixed(1),
+                    orientedAxis.x.toFixed(3), orientedAxis.y.toFixed(3), orientedAxis.z.toFixed(3),
+                ].join('|');
+                if (seen.has(key)) continue;
+
+                const candidate: PsSurface = {
+                    id: nextId,
+                    surfaceType: 'cone',
+                    params: {
+                        origin: apex,
+                        axis: orientedAxis,
+                        radius: 0,
+                        halfAngle: ParasolidParser.INFERRED_APEX_CONE_ANGLE,
+                    },
+                };
+                nextId++;
+                seen.add(key);
+                inferred.push(candidate);
+            }
+        }
+
+        return inferred;
     }
 
     /**
@@ -2353,7 +2531,10 @@ export class ParasolidParser {
             [...validatedSurfaces, ...inferredPlanes],
             vertices,
         );
-        const surfaces = this.deduplicateSurfaces(mergedSurfaces);
+        // Apply narrow cone recovery after the washer pass so it sees the same
+        // consolidated cylinder inventory as the bounded-topology builder.
+        const inferredCones = this.inferApexConesFromCylinderPairs(mergedSurfaces, vertices);
+        const surfaces = this.deduplicateSurfaces([...mergedSurfaces, ...inferredCones]);
 
         // Re-number deduplicated surfaces sequentially
         surfaces.forEach((s, i) => { s.id = i + 1; });

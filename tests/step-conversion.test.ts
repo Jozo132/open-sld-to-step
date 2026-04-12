@@ -32,6 +32,9 @@ function findSldprtFiles(dir: string): string[] {
 const sampleFiles = findSldprtFiles(DOWNLOADS_DIR);
 const hasSamples = sampleFiles.length > 0;
 const describeWithSamples = hasSamples ? describe : describe.skip;
+const ctc04Path = sampleFiles.find(filePath =>
+    basename(filePath).toLowerCase() === 'nist_ctc_04_asme1_rd_sw1802.sldprt',
+);
 const ftc11Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ftc_11_asme1_rb_sw1802.sldprt',
 );
@@ -153,6 +156,22 @@ describe('ParasolidParser', () => {
         expect(model.loops).toHaveLength(12);
         expect(model.edges).toHaveLength(6);
         expect(model.curves.filter(c => c.curveType === 'circle')).toHaveLength(6);
+    });
+
+    it('infers CTC_04 apex cones from coaxial cylinder transitions', () => {
+        if (!ctc04Path) return;
+
+        const buf = readFileSync(ctc04Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        // Regression target from clean-room analysis: 12 reference apex cones
+        // can be recovered from repeated 5mm -> 10mm coaxial cylinder steps.
+        expect(model.surfaces.filter(s => s.surfaceType === 'cone').length).toBeGreaterThanOrEqual(12);
     });
 });
 
