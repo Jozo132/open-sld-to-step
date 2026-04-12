@@ -97,8 +97,67 @@ function resolveAxis2Placement(entities, id) {
     return { origin, axis, refDir };
 }
 
+function extractRefs(args) {
+    return [...args.matchAll(/#(\d+)/g)].map(m => parseInt(m[1], 10));
+}
+
+function resolvePlaneAngleMeasureFactor(entities, id, seen = new Set()) {
+    if (seen.has(id)) return null;
+    seen.add(id);
+
+    const e = entities.get(id);
+    if (!e) return null;
+
+    const measureMatch = e.args.match(/PLANE_ANGLE_MEASURE\(\s*([0-9.eE+\-]+)\s*\)/);
+    if (measureMatch) {
+        return parseFloat(measureMatch[1]);
+    }
+
+    for (const ref of extractRefs(e.args)) {
+        const nested = resolvePlaneAngleMeasureFactor(entities, ref, seen);
+        if (nested !== null) return nested;
+    }
+
+    return null;
+}
+
+function resolvePlaneAngleUnitFactor(entities, id) {
+    const e = entities.get(id);
+    if (!e || !e.types.includes('PLANE_ANGLE_UNIT')) return null;
+
+    if (e.types.includes('SI_UNIT') && /\.RADIAN\./i.test(e.args)) {
+        return 1.0;
+    }
+
+    if (e.types.includes('CONVERSION_BASED_UNIT')) {
+        for (const ref of extractRefs(e.args)) {
+            const factor = resolvePlaneAngleMeasureFactor(entities, ref);
+            if (factor !== null) return factor;
+        }
+    }
+
+    return null;
+}
+
+function detectPlaneAngleUnitScale(entities) {
+    for (const [, e] of entities) {
+        if (!e.types.includes('GLOBAL_UNIT_ASSIGNED_CONTEXT')) continue;
+        for (const ref of extractRefs(e.args)) {
+            const factor = resolvePlaneAngleUnitFactor(entities, ref);
+            if (factor !== null) return factor;
+        }
+    }
+
+    for (const [id] of entities) {
+        const factor = resolvePlaneAngleUnitFactor(entities, id);
+        if (factor !== null) return factor;
+    }
+
+    return 1.0;
+}
+
 // ─── Geometry extraction ──────────────────────────────────────────────────────
-function extractGeometry(entities) {
+function extractGeometry(entities, planeAngleScale = 1.0) {
     const geom = {
         planes: [], cylinders: [], cones: [], spheres: [],
         toroids: [], bsplineSurfaces: [], circles: [], lines: [],
@@ -128,7 +187,7 @@ function extractGeometry(entities) {
             if (parts) {
                 const ax = resolveAxis2Placement(entities, parseInt(parts[1], 10));
                 if (ax?.origin && ax?.axis) {
-                    geom.cones.push({ id, origin: ax.origin, axis: ax.axis, radius: parseFloat(parts[2]), semiAngle: parseFloat(parts[3]) });
+                    geom.cones.push({ id, origin: ax.origin, axis: ax.axis, radius: parseFloat(parts[2]), semiAngle: parseFloat(parts[3]) * planeAngleScale });
                 }
             }
         }
@@ -165,7 +224,7 @@ function extractGeometry(entities) {
 }
 
 // ─── ADVANCED_FACE extraction ─────────────────────────────────────────────────
-function extractFaces(entities) {
+function extractFaces(entities, planeAngleScale = 1.0) {
     const faces = [];
     for (const [id, e] of entities) {
         if (!e.types.includes('ADVANCED_FACE')) continue;
@@ -209,7 +268,7 @@ function extractFaces(entities) {
             const parts = surfEnt.args.match(/'[^']*'\s*,\s*#(\d+)\s*,\s*([0-9.eE+\-]+)\s*,\s*([0-9.eE+\-]+)/);
             if (parts) {
                 const ax = resolveAxis2Placement(entities, parseInt(parts[1], 10));
-                if (ax?.origin && ax?.axis) surfGeom = { surfType: 'CONICAL_SURFACE', origin: ax.origin, axis: ax.axis, radius: parseFloat(parts[2]), semiAngle: parseFloat(parts[3]) };
+                if (ax?.origin && ax?.axis) surfGeom = { surfType: 'CONICAL_SURFACE', origin: ax.origin, axis: ax.axis, radius: parseFloat(parts[2]), semiAngle: parseFloat(parts[3]) * planeAngleScale };
             }
         }
 
@@ -491,6 +550,8 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
 
     const genEntities = parseStepEntities(genText);
     const refEntities = parseStepEntities(refText);
+    const genAngleScale = detectPlaneAngleUnitScale(genEntities);
+    const refAngleScale = detectPlaneAngleUnitScale(refEntities);
     log(`Parsed entities: generated=${genEntities.size}, reference=${refEntities.size}\n`);
 
     // ──── 1. Entity Count Comparison ────────────────────────────────────────
@@ -539,11 +600,12 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
     const genScale = detectLengthUnitScale(genText);
     const refScale = detectLengthUnitScale(refText);
     // Normalize both to mm
-    let genGeom = extractGeometry(genEntities);
-    let refGeom = extractGeometry(refEntities);
+    let genGeom = extractGeometry(genEntities, genAngleScale);
+    let refGeom = extractGeometry(refEntities, refAngleScale);
     if (genScale !== 1.0) genGeom = scaleGeometry(genGeom, genScale);
     if (refScale !== 1.0) refGeom = scaleGeometry(refGeom, refScale);
     log(`  Units: generated=${genScale === 1 ? 'mm' : genScale === 25.4 ? 'in' : genScale + 'x'}  reference=${refScale === 1 ? 'mm' : refScale === 25.4 ? 'in' : refScale + 'x'}`);
+    log(`  Plane-angle units: generated=${genAngleScale === 1 ? 'rad' : `${genAngleScale.toFixed(6)}rad/unit`}  reference=${refAngleScale === 1 ? 'rad' : `${refAngleScale.toFixed(6)}rad/unit`}`);
 
 
     function reportMatch(label, genArr, refArr, distFn, maxDist) {
@@ -582,8 +644,8 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
 
     // ──── 3. ADVANCED_FACE Matching ─────────────────────────────────────────
     log('\n─── 3. ADVANCED_FACE 1:1 MATCHING ─────────────────────────────');
-    let genFaces = extractFaces(genEntities);
-    let refFaces = extractFaces(refEntities);
+    let genFaces = extractFaces(genEntities, genAngleScale);
+    let refFaces = extractFaces(refEntities, refAngleScale);
     if (genScale !== 1.0) genFaces = scaleFaces(genFaces, genScale);
     if (refScale !== 1.0) refFaces = scaleFaces(refFaces, refScale);
     const faceResult = greedyMatch(genFaces, refFaces, faceDist, 200);

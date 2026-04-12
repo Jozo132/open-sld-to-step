@@ -339,8 +339,18 @@ export class ParasolidToStepMapper {
         );
 
         // ── Map vertices → CARTESIAN_POINT + VERTEX_POINT ──────────────
+        // Only emit vertices that are actually referenced by edges.
+        // This avoids inflating the VERTEX_POINT count with extraction
+        // artifacts (brute-force scan false-positives, etc.).
+        // If no edges exist, emit all vertices for backward compatibility.
+        const usedVertexIds = new Set<number>();
+        for (const e of model.edges) {
+            usedVertexIds.add(e.startVertex);
+            usedVertexIds.add(e.endVertex);
+        }
         const vertexStepIds = new Map<number, number>();
         for (const v of model.vertices) {
+            if (usedVertexIds.size > 0 && !usedVertexIds.has(v.id)) continue;
             const ptId = this.addPoint('', v.position.x, v.position.y, v.position.z);
             const vtxId = this.addEntity('VERTEX_POINT', `'',#${ptId}`);
             vertexStepIds.set(v.id, vtxId);

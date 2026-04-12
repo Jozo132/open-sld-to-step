@@ -110,6 +110,7 @@ const ENTITY_SURFACE = 0x1e;   // SURFACE/CURVE — geometry with float64 params
 const ENTITY_BSPLINE = 0x1f;   // B-SPLINE curve/surface
 const ENTITY_SHELL = 0x11;     // BODY/REGION/SHELL container
 const ENTITY_LOOP = 0x13;      // LOOP — ordered set of coedges
+const ENTITY_ATTRIB = 0x20;    // ATTRIB/TRANSFORM — additional surface geometry
 
 /**
  * Bytes from the type marker (00 1D) to the start of coordinate data
@@ -291,6 +292,10 @@ export class ParasolidParser {
      * The type-0x1D record layout (40 bytes from type marker to end of z):
      *   [00 1D] [id:2] [00 00] [ref:2] [00 01] [ref:2] [ref:2] [ref:2]
      *   [x:f64BE] [y:f64BE] [z:f64BE]
+    *
+    * Some files also store point records in the packed pre-sentinel region.
+    * Those records are not enclosed by sentinel blocks, but still contain a
+    * stable point header and the same 16-byte offset to the x/y/z triplet.
      *
      * Validated against all 11 NIST SolidWorks MBD 2018 test files.
      * Returns null if no sentinels are found (triggers brute-force fallback).
@@ -313,6 +318,11 @@ export class ParasolidParser {
         const points: PsPoint[] = [];
         const seen = new Set<string>();
 
+        // Markerless files such as FTC_11 store valid point records in the
+        // packed pre-sentinel region. Scan that area structurally before
+        // dropping to the brute-force float scanner.
+        this.extractPackedPoints(0, sentPositions[0], maxPoints, points, seen);
+
         for (let i = 0; i < sentPositions.length && points.length < maxPoints; i++) {
             const blockStart = sentPositions[i] + SENTINEL.length;
             const blockEnd = (i + 1 < sentPositions.length)
@@ -321,25 +331,8 @@ export class ParasolidParser {
 
             // Scan for type-0x1D markers within this sentinel block
             for (let j = blockStart; j + POINT_COORD_OFFSET + 24 <= blockEnd; j++) {
-                if (buf[j] !== 0x00 || buf[j + 1] !== ENTITY_POINT) continue;
-
-                // Validate record structure: [00 1D] [id:2] [00 00] ... [00 01]
-                if (j + POINT_COORD_OFFSET + 24 > buf.length) continue;
-                if (buf[j + 4] !== 0x00 || buf[j + 5] !== 0x00) continue;
-                if (buf[j + 8] !== 0x00 || buf[j + 9] !== 0x01) continue;
-
-                const x = buf.readDoubleBE(j + POINT_COORD_OFFSET);
-                const y = buf.readDoubleBE(j + POINT_COORD_OFFSET + 8);
-                const z = buf.readDoubleBE(j + POINT_COORD_OFFSET + 16);
-
-                if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
-                if (Math.abs(x) > 1e4 || Math.abs(y) > 1e4 || Math.abs(z) > 1e4) continue;
-
-                const key = `${x.toFixed(9)},${y.toFixed(9)},${z.toFixed(9)}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-
-                points.push({ x, y, z });
+                if (!this.isSentinelPointRecord(j)) continue;
+                if (!this.pushPointAtOffset(j + POINT_COORD_OFFSET, points, seen)) continue;
                 if (points.length >= maxPoints) return points;
 
                 // Skip past this entity record to avoid re-scanning within it
@@ -348,6 +341,63 @@ export class ParasolidParser {
         }
 
         return points.length > 0 ? points : null;
+    }
+
+    /** Extract packed point records from a byte range outside sentinel blocks. @internal */
+    private extractPackedPoints(
+        start: number,
+        end: number,
+        maxPoints: number,
+        points: PsPoint[],
+        seen: Set<string>,
+    ): void {
+        for (let offset = start; offset + POINT_COORD_OFFSET + 24 <= end && points.length < maxPoints; offset++) {
+            if (!this.isPackedPointRecord(offset)) continue;
+            if (!this.pushPointAtOffset(offset + POINT_COORD_OFFSET, points, seen)) continue;
+            offset += POINT_COORD_OFFSET + 23;
+        }
+    }
+
+    /** Validate the standard sentinel-block POINT record layout. @internal */
+    private isSentinelPointRecord(offset: number): boolean {
+        const buf = this.buf;
+        if (offset + POINT_COORD_OFFSET + 24 > buf.length) return false;
+        if (buf[offset] !== 0x00 || buf[offset + 1] !== ENTITY_POINT) return false;
+        if (buf[offset + 4] !== 0x00 || buf[offset + 5] !== 0x00) return false;
+        return buf[offset + 8] === 0x00 && buf[offset + 9] === 0x01;
+    }
+
+    /**
+     * Validate the packed FF-style POINT layout seen before the sentinel zone.
+     * The x/y/z triplet still begins 16 bytes after the type marker.
+     * @internal
+     */
+    private isPackedPointRecord(offset: number): boolean {
+        const buf = this.buf;
+        if (offset + POINT_COORD_OFFSET + 24 > buf.length) return false;
+        if (buf[offset] !== 0x00 || buf[offset + 1] !== ENTITY_POINT) return false;
+        if (buf[offset + 2] !== 0xff) return false;
+        if (buf[offset + 5] !== 0x00 || buf[offset + 6] !== 0x00) return false;
+
+        // Four uint16 references precede the coordinate triplet in the packed body.
+        for (let refOffset = offset + 8; refOffset < offset + POINT_COORD_OFFSET; refOffset += 2) {
+            const ref = buf.readUInt16BE(refOffset);
+            if (ref > 60000) return false;
+        }
+
+        return this.tryReadTriplet(buf, offset + POINT_COORD_OFFSET) !== null;
+    }
+
+    /** Deduplicate and append a point read from a known coordinate offset. @internal */
+    private pushPointAtOffset(offset: number, points: PsPoint[], seen: Set<string>): boolean {
+        const point = this.tryReadTriplet(this.buf, offset);
+        if (!point) return false;
+
+        const key = `${point.x.toFixed(9)},${point.y.toFixed(9)},${point.z.toFixed(9)}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        points.push(point);
+        return true;
     }
 
     /**
@@ -549,26 +599,72 @@ export class ParasolidParser {
      * @internal
      */
     private static readGeomFloats(data: Buffer): { floats: number[]; marker: number } | null {
-        // Try both 0x2B ('+') and 0x2D ('-') markers
+        let best: { floats: number[]; marker: number; score: number; markerIdx: number } | null = null;
+
+        // Try every occurrence of both 0x2B ('+') and 0x2D ('-') markers.
+        // Some entities contain earlier marker bytes in reference fields; the
+        // real geometry payload is often attached to a later marker.
         for (const marker of [0x2b, 0x2d]) {
-            const markerIdx = data.indexOf(marker);
-            if (markerIdx < 0 || markerIdx + 1 + 8 > data.length) continue;
-            const floats: number[] = [];
-            for (let off = markerIdx + 1; off + 8 <= data.length; off += 8) {
-                const val = data.readDoubleBE(off);
-                if (!isFinite(val) || Math.abs(val) > 1e6) break;
-                floats.push(val);
+            let markerIdx = -1;
+            while ((markerIdx = data.indexOf(marker, markerIdx + 1)) >= 0) {
+                if (markerIdx + 1 + 8 > data.length) continue;
+
+                const floats: number[] = [];
+                for (let off = markerIdx + 1; off + 8 <= data.length; off += 8) {
+                    const val = data.readDoubleBE(off);
+                    if (!isFinite(val) || Math.abs(val) > 1e6) break;
+                    floats.push(val);
+                }
+                if (floats.length < 3) continue;
+
+                const score = ParasolidParser.scoreGeomFloats(floats);
+                if (!best || score > best.score ||
+                    (score === best.score && floats.length > best.floats.length) ||
+                    (score === best.score && floats.length === best.floats.length && markerIdx > best.markerIdx)) {
+                    best = { floats, marker, score, markerIdx };
+                }
             }
-            if (floats.length >= 3) return { floats, marker };
         }
-        return null;
+
+        return best ? { floats: best.floats, marker: best.marker } : null;
+    }
+
+    /** Score how likely a float sequence is to be real geometry. @internal */
+    private static scoreGeomFloats(floats: number[]): number {
+        let score = floats.length;
+
+        // Prefer common observed payload sizes.
+        if ([7, 8, 11, 12, 13, 14, 15, 16, 17, 20, 22, 24].includes(floats.length)) {
+            score += 5;
+        }
+
+        const tinyPenalty = floats
+            .slice(0, Math.min(floats.length, 12))
+            .filter(value => Math.abs(value) > 0 && Math.abs(value) < 1e-100)
+            .length;
+        score -= tinyPenalty * 3;
+
+        if (floats.length >= 7) {
+            const dirMag = Math.sqrt(
+                floats[3] * floats[3] + floats[4] * floats[4] + floats[5] * floats[5],
+            );
+            if (dirMag >= 0.5 && dirMag <= 1.5) score += 15;
+        }
+
+        if (floats.length >= 11) {
+            const radius = floats[9];
+            if (radius > 0 && radius < 1e4) score += 10;
+            if (Math.abs(floats[10]) < 10) score += 5;
+        }
+
+        return score;
     }
 
     /**
      * Extract cylinder/cone surfaces from type-0x1F (SURFACE/BSPLINE) entities.
      * These are the reliably identifiable surfaces from the binary stream.
      *
-     * Also extracts candidate plane surfaces from type-0x1E entities that
+    * Also extracts candidate plane surfaces from type-0x1E entities that
      * have 7 floats and a unit-length direction vector. These will be
      * validated later by vertex association (≥3 coplanar vertices → plane).
      *
@@ -859,6 +955,41 @@ export class ParasolidParser {
         }
 
         return inferred;
+    }
+
+    // ── Vertex outlier filtering ─────────────────────────────────────────────
+
+    /**
+     * Remove outlier vertices using IQR (interquartile range) per axis.
+     * Vertices beyond Q1 - 3×IQR or Q3 + 3×IQR on any axis are removed.
+     * This filters false-positive coordinates from brute-force scanning
+     * (e.g., unit-vector components read as 1000mm coordinates).
+     * @internal
+     */
+    private static filterOutlierVertices(vertices: PsVertex[]): PsVertex[] {
+        if (vertices.length < 20) return vertices;
+
+        const coords = [
+            vertices.map(v => v.position.x),
+            vertices.map(v => v.position.y),
+            vertices.map(v => v.position.z),
+        ];
+
+        const bounds: Array<{ lo: number; hi: number }> = coords.map(arr => {
+            const sorted = arr.slice().sort((a, b) => a - b);
+            const q1 = sorted[Math.floor(sorted.length * 0.25)];
+            const q3 = sorted[Math.floor(sorted.length * 0.75)];
+            const iqr = q3 - q1;
+            return { lo: q1 - 3 * iqr, hi: q3 + 3 * iqr };
+        });
+
+        const filtered = vertices.filter(v =>
+            v.position.x >= bounds[0].lo && v.position.x <= bounds[0].hi &&
+            v.position.y >= bounds[1].lo && v.position.y <= bounds[1].hi &&
+            v.position.z >= bounds[2].lo && v.position.z <= bounds[2].hi,
+        );
+
+        return filtered.length >= 3 ? filtered : vertices;
     }
 
     // ── Surface deduplication ────────────────────────────────────────────────
@@ -1728,7 +1859,11 @@ export class ParasolidParser {
         }
 
         // ── Step 3: Infer additional planes from vertex positions ───────
-        const inferredPlanes = this.inferPlanesFromVertices(vertices, validatedSurfaces);
+        // Use outlier-filtered vertices for inference to avoid phantom planes
+        // from brute-force vertex false-positives (e.g., unit-vector
+        // components at 1000mm, entity metadata read as coordinates).
+        const inferVertices = ParasolidParser.filterOutlierVertices(vertices);
+        let inferredPlanes = this.inferPlanesFromVertices(inferVertices, validatedSurfaces);
 
         // ── Step 4: Merge and deduplicate ───────────────────────────────
         const mergedSurfaces = [...validatedSurfaces, ...inferredPlanes];
