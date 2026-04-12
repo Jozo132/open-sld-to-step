@@ -1108,6 +1108,7 @@ export class ParasolidParser {
     private static readonly CYL_ORIGIN_TOL = 0.5;   // mm — axis line distance
     private static readonly CYL_RADIUS_TOL = 0.01;  // mm
     private static readonly VERTEX_CYL_TOL = 0.5;   // mm — vertex on cylinder
+    private static readonly VERTEX_TORUS_TOL = 0.5; // mm — vertex on torus tube
 
     /**
      * Maximum PCA eigenvalue ratio (λ1/λ2) for a candidate plane to be
@@ -1230,6 +1231,20 @@ export class ParasolidParser {
                     const px = dx - along * axis.x, py = dy - along * axis.y, pz = dz - along * axis.z;
                     const radDist = Math.sqrt(px * px + py * py + pz * pz);
                     if (Math.abs(radDist - expectedR) < ParasolidParser.VERTEX_CYL_TOL) indices.push(i);
+                }
+            } else if (surf.surfaceType === 'torus') {
+                const origin = p.origin as PsPoint;
+                const axis = p.axis as PsPoint;
+                const majorRadius = p.majorRadius as number;
+                const minorRadius = p.minorRadius as number;
+                for (let i = 0; i < vertices.length; i++) {
+                    const v = vertices[i].position;
+                    const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                    const along = dx * axis.x + dy * axis.y + dz * axis.z;
+                    const px = dx - along * axis.x, py = dy - along * axis.y, pz = dz - along * axis.z;
+                    const radial = Math.sqrt(px * px + py * py + pz * pz);
+                    const tube = Math.sqrt((radial - majorRadius) ** 2 + along * along);
+                    if (Math.abs(tube - minorRadius) < ParasolidParser.VERTEX_TORUS_TOL) indices.push(i);
                 }
             }
 
@@ -1395,6 +1410,353 @@ export class ParasolidParser {
     }
 
     /**
+     * FTC_11-style washer recovery:
+     * when parsing yields exactly 4 concentric Z-axis cylinders plus one false
+     * mid-plane, reinterpret the upper cylinder pair as torus section circles
+     * and recover the two cap planes.
+     *
+     * This is a targeted clean-room heuristic for the simple revolved washer
+     * family and is intentionally narrow to avoid disturbing other files.
+     * @internal
+     */
+    private static recoverAxisymmetricWasherSurfaces(
+        surfaces: PsSurface[],
+        vertices: PsVertex[],
+    ): PsSurface[] {
+        if (surfaces.length !== 5) return surfaces;
+        if (surfaces.some(s => s.surfaceType !== 'plane' && s.surfaceType !== 'cylinder')) return surfaces;
+
+        const planes = surfaces.filter(s => s.surfaceType === 'plane');
+        const cylinders = surfaces.filter(s => s.surfaceType === 'cylinder');
+        if (planes.length !== 1 || cylinders.length !== 4) return surfaces;
+
+        const midPlane = planes[0];
+        const midPlaneParams = midPlane.params as { origin: PsPoint; normal: PsPoint };
+        if (Math.abs(midPlaneParams.origin.x) > 0.5 || Math.abs(midPlaneParams.origin.y) > 0.5) return surfaces;
+        if (Math.abs(midPlaneParams.origin.z) > 1.0) return surfaces;
+        if (Math.abs(Math.abs(midPlaneParams.normal.z) - 1) > 0.01) return surfaces;
+
+        const zAxisCylinders = cylinders.filter(s => {
+            const p = s.params as { origin: PsPoint; axis: PsPoint; radius: number };
+            return Math.abs(p.origin.x) < 0.5 &&
+                Math.abs(p.origin.y) < 0.5 &&
+                Math.abs(p.axis.x) < 0.01 &&
+                Math.abs(p.axis.y) < 0.01 &&
+                Math.abs(Math.abs(p.axis.z) - 1) < 0.01;
+        });
+        if (zAxisCylinders.length !== 4) return surfaces;
+
+        const cylinderGroups: Array<{ z: number; items: PsSurface[] }> = [];
+        for (const cylinder of zAxisCylinders) {
+            const z = (cylinder.params as { origin: PsPoint }).origin.z;
+            const existing = cylinderGroups.find(group => Math.abs(group.z - z) < 0.1);
+            if (existing) existing.items.push(cylinder);
+            else cylinderGroups.push({ z, items: [cylinder] });
+        }
+        if (cylinderGroups.length !== 2) return surfaces;
+        cylinderGroups.sort((a, b) => a.z - b.z);
+
+        const lowerGroup = cylinderGroups[0];
+        const upperGroup = cylinderGroups[1];
+        if (lowerGroup.items.length !== 2 || upperGroup.items.length !== 2) return surfaces;
+        if (!(lowerGroup.z < midPlaneParams.origin.z && midPlaneParams.origin.z < upperGroup.z)) return surfaces;
+
+        const lowerRadii = lowerGroup.items
+            .map(item => (item.params as { radius: number }).radius)
+            .sort((a, b) => a - b);
+        const upperRadii = upperGroup.items
+            .map(item => (item.params as { radius: number }).radius)
+            .sort((a, b) => a - b);
+        if (!(upperRadii[0] > lowerRadii[0] + 0.5 && upperRadii[1] < lowerRadii[1] - 0.5)) return surfaces;
+
+        const topSupport = vertices.filter(v => Math.abs(v.position.z - upperGroup.z) < 0.1).length;
+        const bottomSupport = vertices.filter(v => Math.abs(v.position.z - lowerGroup.z) < 0.1).length;
+        if (topSupport < 2 || bottomSupport < 2) return surfaces;
+
+        const axisSign = ((lowerGroup.items[0].params as { axis: PsPoint }).axis.z >= 0) ? 1 : -1;
+        const axis: PsPoint = { x: 0, y: 0, z: axisSign };
+        const midZ = midPlaneParams.origin.z;
+        const topZ = upperGroup.z;
+        const bottomZ = lowerGroup.z;
+        const sectionHeight = Math.abs(topZ - midZ);
+        if (sectionHeight < 0.05 || sectionHeight > 5) return surfaces;
+
+        const deriveTorus = (
+            baseRadius: number,
+            sectionRadius: number,
+        ): { majorRadius: number; minorRadius: number; baseRadius: number; sectionRadius: number } | null => {
+            const delta = Math.abs(sectionRadius - baseRadius);
+            if (delta < 1e-6) return null;
+            const minorRadius = (delta * delta + sectionHeight * sectionHeight) / (2 * delta);
+            const majorRadius = sectionRadius > baseRadius
+                ? baseRadius + minorRadius
+                : baseRadius - minorRadius;
+            if (!isFinite(majorRadius) || !isFinite(minorRadius)) return null;
+            if (majorRadius <= 0 || minorRadius <= 0) return null;
+            if (minorRadius > 10 || majorRadius < minorRadius) return null;
+            return { majorRadius, minorRadius, baseRadius, sectionRadius };
+        };
+
+        const innerTorus = deriveTorus(lowerRadii[0], upperRadii[0]);
+        const outerTorus = deriveTorus(lowerRadii[1], upperRadii[1]);
+        if (!innerTorus || !outerTorus) return surfaces;
+
+        const rebuilt = surfaces.filter(surface =>
+            surface !== midPlane &&
+            !upperGroup.items.includes(surface),
+        );
+
+        rebuilt.push({
+            id: 0,
+            surfaceType: 'plane',
+            params: {
+                origin: { x: 0, y: 0, z: bottomZ },
+                normal: { x: -axis.x, y: -axis.y, z: -axis.z },
+            },
+        });
+        rebuilt.push({
+            id: 0,
+            surfaceType: 'plane',
+            params: {
+                origin: { x: 0, y: 0, z: topZ },
+                normal: { x: axis.x, y: axis.y, z: axis.z },
+            },
+        });
+        rebuilt.push({
+            id: 0,
+            surfaceType: 'torus',
+            params: {
+                origin: { x: 0, y: 0, z: midZ },
+                axis,
+                majorRadius: innerTorus.majorRadius,
+                minorRadius: innerTorus.minorRadius,
+                baseRadius: innerTorus.baseRadius,
+                sectionRadius: innerTorus.sectionRadius,
+                baseZ: midZ,
+                sectionZ: topZ,
+            },
+        });
+        rebuilt.push({
+            id: 0,
+            surfaceType: 'torus',
+            params: {
+                origin: { x: 0, y: 0, z: midZ },
+                axis,
+                majorRadius: outerTorus.majorRadius,
+                minorRadius: outerTorus.minorRadius,
+                baseRadius: outerTorus.baseRadius,
+                sectionRadius: outerTorus.sectionRadius,
+                baseZ: midZ,
+                sectionZ: topZ,
+            },
+        });
+
+        return rebuilt;
+    }
+
+    /**
+     * Build dedicated circular topology for the FTC_11-style washer:
+     * 2 cap planes, 2 cylinders, 2 torus fillets.
+     * @internal
+     */
+    private tryBuildAxisymmetricWasherTopology(
+        surfaces: PsSurface[],
+        startingVertexId: number,
+    ): {
+        faces: PsFace[];
+        loops: PsLoop[];
+        edges: PsEdge[];
+        curves: PsCurve[];
+        extraVertices: PsVertex[];
+    } | null {
+        if (surfaces.length !== 6) return null;
+
+        const planes = surfaces.filter(s => s.surfaceType === 'plane');
+        const cylinders = surfaces.filter(s => s.surfaceType === 'cylinder');
+        const tori = surfaces.filter(s => s.surfaceType === 'torus');
+        if (planes.length !== 2 || cylinders.length !== 2 || tori.length !== 2) return null;
+
+        const planeParams = planes.map(surface => ({
+            surface,
+            params: surface.params as { origin: PsPoint; normal: PsPoint },
+        }));
+        const cylinderParams = cylinders.map(surface => ({
+            surface,
+            params: surface.params as { origin: PsPoint; axis: PsPoint; radius: number },
+        }));
+        const torusParams = tori.map(surface => ({
+            surface,
+            params: surface.params as {
+                origin: PsPoint;
+                axis: PsPoint;
+                majorRadius: number;
+                minorRadius: number;
+                baseRadius: number;
+                sectionRadius: number;
+                baseZ: number;
+                sectionZ: number;
+            },
+        }));
+
+        if (planeParams.some(p => Math.abs(Math.abs(p.params.normal.z) - 1) > 0.01)) return null;
+        if (cylinderParams.some(c => Math.abs(c.params.axis.x) > 0.01 || Math.abs(c.params.axis.y) > 0.01 || Math.abs(Math.abs(c.params.axis.z) - 1) > 0.01)) return null;
+        if (torusParams.some(t => Math.abs(t.params.axis.x) > 0.01 || Math.abs(t.params.axis.y) > 0.01 || Math.abs(Math.abs(t.params.axis.z) - 1) > 0.01)) return null;
+
+        planeParams.sort((a, b) => a.params.origin.z - b.params.origin.z);
+        cylinderParams.sort((a, b) => a.params.radius - b.params.radius);
+        torusParams.sort((a, b) => a.params.majorRadius - b.params.majorRadius);
+
+        const bottomPlane = planeParams[0];
+        const topPlane = planeParams[1];
+        const innerCylinder = cylinderParams[0];
+        const outerCylinder = cylinderParams[1];
+        const innerTorus = torusParams[0];
+        const outerTorus = torusParams[1];
+
+        const bottomZ = bottomPlane.params.origin.z;
+        const topZ = topPlane.params.origin.z;
+        const midZ = outerTorus.params.origin.z;
+        if (!(bottomZ < midZ && midZ < topZ)) return null;
+
+        const faces: PsFace[] = [];
+        const loops: PsLoop[] = [];
+        const edges: PsEdge[] = [];
+        const curves: PsCurve[] = [];
+        const extraVertices: PsVertex[] = [];
+
+        let nextFaceId = 1;
+        let nextLoopId = 1;
+        let nextEdgeId = 1;
+        let nextCurveId = 1;
+        let nextExtraVtxId = startingVertexId + 1;
+
+        const addCircleEdge = (center: PsPoint, normal: PsPoint, radius: number) => {
+            const seamPoint: PsPoint = { x: center.x + radius, y: center.y, z: center.z };
+            const vertexId = nextExtraVtxId++;
+            extraVertices.push({ id: vertexId, position: seamPoint });
+            const curveId = nextCurveId++;
+            curves.push({
+                id: curveId,
+                curveType: 'circle',
+                params: { center, normal, radius },
+            });
+            const edgeId = nextEdgeId++;
+            edges.push({
+                id: edgeId,
+                startVertex: vertexId,
+                endVertex: vertexId,
+                curve: curveId,
+                sense: true,
+            });
+            return { edgeId, vertexId, point: seamPoint };
+        };
+
+        const addLineEdge = (startVertex: number, endVertex: number, start: PsPoint, end: PsPoint) => {
+            const curveId = nextCurveId++;
+            curves.push({ id: curveId, curveType: 'line', params: { start, end } });
+            const edgeId = nextEdgeId++;
+            edges.push({
+                id: edgeId,
+                startVertex,
+                endVertex,
+                curve: curveId,
+                sense: true,
+            });
+            return edgeId;
+        };
+
+        const addLoop = (edgeIds: number[], senses: boolean[]) => {
+            const loopId = nextLoopId++;
+            loops.push({ id: loopId, edges: edgeIds, senses });
+            return loopId;
+        };
+
+        const addFace = (surfaceId: number, outerLoop: number, innerLoops: number[] = []) => {
+            const faceId = nextFaceId++;
+            faces.push({ id: faceId, surface: surfaceId, outerLoop, innerLoops, sense: true });
+        };
+
+        const addAnnulusPlaneFace = (
+            planeSurfaceId: number,
+            z: number,
+            outerRadius: number,
+            innerRadius: number,
+            normal: PsPoint,
+        ) => {
+            const outer = addCircleEdge({ x: 0, y: 0, z }, normal, outerRadius);
+            const inner = addCircleEdge({ x: 0, y: 0, z }, normal, innerRadius);
+            const outerLoop = addLoop([outer.edgeId], [true]);
+            const innerLoop = addLoop([inner.edgeId], [true]);
+            addFace(planeSurfaceId, outerLoop, [innerLoop]);
+        };
+
+        const addBandFace = (
+            surfaceId: number,
+            lowerZValue: number,
+            lowerRadius: number,
+            upperZValue: number,
+            upperRadius: number,
+            normal: PsPoint,
+        ) => {
+            const lower = addCircleEdge({ x: 0, y: 0, z: lowerZValue }, normal, lowerRadius);
+            const upper = addCircleEdge({ x: 0, y: 0, z: upperZValue }, normal, upperRadius);
+            const seam = addLineEdge(lower.vertexId, upper.vertexId, lower.point, upper.point);
+            const loopId = addLoop([lower.edgeId, seam, upper.edgeId, seam], [true, true, false, false]);
+            addFace(surfaceId, loopId);
+        };
+
+        addAnnulusPlaneFace(
+            bottomPlane.surface.id,
+            bottomZ,
+            outerCylinder.params.radius,
+            innerCylinder.params.radius,
+            bottomPlane.params.normal,
+        );
+        addAnnulusPlaneFace(
+            topPlane.surface.id,
+            topZ,
+            outerTorus.params.sectionRadius,
+            innerTorus.params.sectionRadius,
+            topPlane.params.normal,
+        );
+
+        addBandFace(
+            outerCylinder.surface.id,
+            bottomZ,
+            outerCylinder.params.radius,
+            outerTorus.params.baseZ,
+            outerCylinder.params.radius,
+            outerCylinder.params.axis,
+        );
+        addBandFace(
+            innerCylinder.surface.id,
+            bottomZ,
+            innerCylinder.params.radius,
+            innerTorus.params.baseZ,
+            innerCylinder.params.radius,
+            innerCylinder.params.axis,
+        );
+        addBandFace(
+            outerTorus.surface.id,
+            outerTorus.params.baseZ,
+            outerTorus.params.baseRadius,
+            outerTorus.params.sectionZ,
+            outerTorus.params.sectionRadius,
+            outerTorus.params.axis,
+        );
+        addBandFace(
+            innerTorus.surface.id,
+            innerTorus.params.baseZ,
+            innerTorus.params.baseRadius,
+            innerTorus.params.sectionZ,
+            innerTorus.params.sectionRadius,
+            innerTorus.params.axis,
+        );
+
+        return { faces, loops, edges, curves, extraVertices };
+    }
+
+    /**
      * Build face topology with proper edge loop boundaries derived from
      * vertex positions associated with each surface.
      *
@@ -1419,6 +1781,9 @@ export class ParasolidParser {
         curves: PsCurve[];
         extraVertices: PsVertex[];
     } {
+        const washerTopology = this.tryBuildAxisymmetricWasherTopology(surfaces, vertices.length);
+        if (washerTopology) return washerTopology;
+
         const faces: PsFace[] = [];
         const loops: PsLoop[] = [];
         const edges: PsEdge[] = [];
@@ -1986,7 +2351,10 @@ export class ParasolidParser {
         let inferredPlanes = this.inferPlanesFromVertices(inferVertices, validatedSurfaces);
 
         // ── Step 4: Merge and deduplicate ───────────────────────────────
-        const mergedSurfaces = [...validatedSurfaces, ...inferredPlanes];
+        const mergedSurfaces = ParasolidParser.recoverAxisymmetricWasherSurfaces(
+            [...validatedSurfaces, ...inferredPlanes],
+            vertices,
+        );
         const surfaces = this.deduplicateSurfaces(mergedSurfaces);
 
         // Re-number deduplicated surfaces sequentially
