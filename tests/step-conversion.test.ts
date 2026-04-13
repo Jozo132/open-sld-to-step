@@ -633,6 +633,7 @@ describe('ParasolidParser', () => {
             edgeAnchorCount: 1,
             edgeAnchorIds: [1114],
             coedgeAnchorIds: [256],
+            repeatedEdgeIds: [],
             resolvedSurfaceType: 'cylinder',
             chainCount: 1,
             segmentCount: 3,
@@ -646,6 +647,7 @@ describe('ParasolidParser', () => {
             edgeAnchorCount: 2,
             edgeAnchorIds: [7211, 7418],
             coedgeAnchorIds: [366, 375],
+            repeatedEdgeIds: [7215, 7416, 7418],
             resolvedSurfaceType: null,
             chainCount: 1,
             segmentCount: 5,
@@ -666,6 +668,7 @@ describe('ParasolidParser', () => {
             edgeAnchorCount: 2,
             edgeAnchorIds: [101, 202],
             coedgeAnchorIds: [],
+            repeatedEdgeIds: [],
             resolvedSurfaceType: null,
             chainCount: 1,
             segmentCount: 4,
@@ -723,6 +726,7 @@ describe('ParasolidParser', () => {
             edgeAnchorCount: 0,
             edgeAnchorIds: [],
             coedgeAnchorIds: [11, 22],
+            repeatedEdgeIds: [],
             resolvedSurfaceType: null,
             chainCount: 1,
             segmentCount: 5,
@@ -766,6 +770,122 @@ describe('ParasolidParser', () => {
         expect(matchingScore).not.toBeNull();
         expect(nonMatchingScore).not.toBeNull();
         expect((matchingScore?.score ?? Infinity)).toBeLessThan(nonMatchingScore?.score ?? -Infinity);
+    });
+
+    it('penalizes edge-anchored candidates that recover no mapped edges', () => {
+        const scoreRawFaceBoundaryCandidate = (ParasolidParser as unknown as {
+            scoreRawFaceBoundaryCandidate: (hint: unknown, candidate: unknown) => { score: number } | null;
+        }).scoreRawFaceBoundaryCandidate;
+
+        const hint = {
+            faceId: 3,
+            primarySize: 6,
+            collapsedSize: 5,
+            edgeAnchorCount: 2,
+            edgeAnchorIds: [101, 202],
+            coedgeAnchorIds: [11, 22],
+            repeatedEdgeIds: [],
+            resolvedSurfaceType: null,
+            chainCount: 1,
+            segmentCount: 5,
+            maxSegmentLength: 2,
+            maxChainSpan: 90,
+        };
+        const coveredCandidate = {
+            key: 'plane:5:0',
+            surfaceType: 'plane',
+            outerSize: 6,
+            totalSize: 6,
+            holeCount: 0,
+            mappedEdgeCount: 2,
+            mappedEdgeIds: [303, 404],
+            mappedCoedgeIds: [33, 44, 55],
+            chainCount: 1,
+            segmentCount: 5,
+            maxSegmentLength: 2,
+            maxChainSpan: 90,
+            matched: false,
+        };
+        const uncoveredCandidate = {
+            key: 'plane:6:0',
+            surfaceType: 'plane',
+            outerSize: 6,
+            totalSize: 6,
+            holeCount: 0,
+            mappedEdgeCount: 0,
+            mappedEdgeIds: [],
+            mappedCoedgeIds: [33, 44, 55],
+            chainCount: 1,
+            segmentCount: 5,
+            maxSegmentLength: 2,
+            maxChainSpan: 90,
+            matched: false,
+        };
+
+        const coveredScore = scoreRawFaceBoundaryCandidate(hint, coveredCandidate);
+        const uncoveredScore = scoreRawFaceBoundaryCandidate(hint, uncoveredCandidate);
+
+        expect(coveredScore).not.toBeNull();
+        expect(uncoveredScore).not.toBeNull();
+        expect((coveredScore?.score ?? Infinity)).toBeLessThan(uncoveredScore?.score ?? -Infinity);
+    });
+
+    it('uses repeated non-anchor raw hits to break duplicate-anchor ties', () => {
+        const scoreRawFaceBoundaryCandidate = (ParasolidParser as unknown as {
+            scoreRawFaceBoundaryCandidate: (hint: unknown, candidate: unknown) => { score: number } | null;
+        }).scoreRawFaceBoundaryCandidate;
+
+        const hint = {
+            faceId: 4,
+            primarySize: 4,
+            collapsedSize: 4,
+            edgeAnchorCount: 2,
+            edgeAnchorIds: [101, 101],
+            coedgeAnchorIds: [11, 12],
+            repeatedEdgeIds: [101, 202],
+            resolvedSurfaceType: null,
+            chainCount: 1,
+            segmentCount: 4,
+            maxSegmentLength: 2,
+            maxChainSpan: 60,
+        };
+        const supportingCandidate = {
+            key: 'cylinder:7:0',
+            surfaceType: 'cylinder',
+            outerSize: 4,
+            totalSize: 4,
+            holeCount: 0,
+            mappedEdgeCount: 3,
+            mappedEdgeIds: [202, 303, 404],
+            mappedCoedgeIds: [11, 21, 31, 41],
+            chainCount: 1,
+            segmentCount: 2,
+            maxSegmentLength: 2,
+            maxChainSpan: 60,
+            matched: false,
+        };
+        const unsupportedCandidate = {
+            key: 'cylinder:8:0',
+            surfaceType: 'cylinder',
+            outerSize: 4,
+            totalSize: 4,
+            holeCount: 0,
+            mappedEdgeCount: 3,
+            mappedEdgeIds: [203, 304, 405],
+            mappedCoedgeIds: [12, 22, 32, 42],
+            chainCount: 1,
+            segmentCount: 2,
+            maxSegmentLength: 2,
+            maxChainSpan: 60,
+            matched: false,
+        };
+
+        const supportingScore = scoreRawFaceBoundaryCandidate(hint, supportingCandidate);
+        const unsupportedScore = scoreRawFaceBoundaryCandidate(hint, unsupportedCandidate);
+
+        expect(supportingScore).not.toBeNull();
+        expect(unsupportedScore).not.toBeNull();
+        expect((supportingScore?.score ?? Infinity)).toBeLessThan(unsupportedScore?.score ?? -Infinity);
     });
 
     it('reconstructs ordered type-16 component chains across NIST samples', () => {
