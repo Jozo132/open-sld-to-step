@@ -595,6 +595,7 @@ describe('ParasolidParser', () => {
             expect(hints.every(hint => hint.primarySize >= 3)).toBe(true);
             expect(hints.every(hint => hint.collapsedSize === null || hint.collapsedSize >= 3)).toBe(true);
             expect(hints.every(hint => hint.edgeAnchorCount >= 0 && hint.edgeAnchorCount <= 2)).toBe(true);
+            expect(hints.every(hint => hint.edgeAnchorIds.length === hint.edgeAnchorCount)).toBe(true);
             expect(hints.every(hint => hint.chainCount >= 0)).toBe(true);
             expect(hints.every(hint => hint.segmentCount >= 0)).toBe(true);
             expect(hints.every(hint => hint.maxSegmentLength >= 0)).toBe(true);
@@ -629,6 +630,7 @@ describe('ParasolidParser', () => {
             primarySize: 3,
             collapsedSize: 3,
             edgeAnchorCount: 1,
+            edgeAnchorIds: [1114],
             resolvedSurfaceType: 'cylinder',
             chainCount: 1,
             segmentCount: 3,
@@ -640,12 +642,67 @@ describe('ParasolidParser', () => {
             primarySize: 8,
             collapsedSize: 5,
             edgeAnchorCount: 2,
+            edgeAnchorIds: [7211, 7418],
             resolvedSurfaceType: null,
             chainCount: 1,
             segmentCount: 5,
             maxSegmentLength: 4,
             maxChainSpan: 305,
         });
+    });
+
+    it('prefers candidates that contain the explicit raw face edge anchors', () => {
+        const scoreRawFaceBoundaryCandidate = (ParasolidParser as unknown as {
+            scoreRawFaceBoundaryCandidate: (hint: unknown, candidate: unknown) => { score: number } | null;
+        }).scoreRawFaceBoundaryCandidate;
+
+        const hint = {
+            faceId: 1,
+            primarySize: 4,
+            collapsedSize: 4,
+            edgeAnchorCount: 2,
+            edgeAnchorIds: [101, 202],
+            resolvedSurfaceType: null,
+            chainCount: 1,
+            segmentCount: 4,
+            maxSegmentLength: 1,
+            maxChainSpan: 20,
+        };
+        const matchingCandidate = {
+            key: 'plane:1:0',
+            surfaceType: 'plane',
+            outerSize: 4,
+            totalSize: 4,
+            holeCount: 0,
+            mappedEdgeCount: 4,
+            mappedEdgeIds: [101, 202, 303, 404],
+            chainCount: 1,
+            segmentCount: 4,
+            maxSegmentLength: 1,
+            maxChainSpan: 20,
+            matched: false,
+        };
+        const nonMatchingCandidate = {
+            key: 'plane:2:0',
+            surfaceType: 'plane',
+            outerSize: 4,
+            totalSize: 4,
+            holeCount: 0,
+            mappedEdgeCount: 4,
+            mappedEdgeIds: [303, 404, 505, 606],
+            chainCount: 1,
+            segmentCount: 4,
+            maxSegmentLength: 1,
+            maxChainSpan: 20,
+            matched: false,
+        };
+
+        const matchingScore = scoreRawFaceBoundaryCandidate(hint, matchingCandidate);
+        const nonMatchingScore = scoreRawFaceBoundaryCandidate(hint, nonMatchingCandidate);
+
+        expect(matchingScore).not.toBeNull();
+        expect(nonMatchingScore).not.toBeNull();
+        expect((matchingScore?.score ?? Infinity)).toBeLessThan(nonMatchingScore?.score ?? -Infinity);
     });
 
     it('reconstructs ordered type-16 component chains across NIST samples', () => {

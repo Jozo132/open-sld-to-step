@@ -196,6 +196,8 @@ for (const filePath of sampleFiles) {
             totalSize: option.candidate.totalSize,
             holeCount: option.candidate.holeCount,
             mappedEdges: option.candidate.mappedEdgeCount,
+            anchorMatches: entry.hint.edgeAnchorIds.filter((edgeId) => option.candidate.mappedEdgeIds.includes(edgeId)).length,
+            matchedAnchors: entry.hint.edgeAnchorIds.filter((edgeId) => option.candidate.mappedEdgeIds.includes(edgeId)),
             chains: option.candidate.chainCount,
             segments: option.candidate.segmentCount,
             maxSeg: option.candidate.maxSegmentLength,
@@ -206,7 +208,7 @@ for (const filePath of sampleFiles) {
         }));
 
         console.log(
-            `  face=${entry.hint.faceId} mode=${entry.mode} primary=${entry.hint.primarySize} collapsed=${entry.hint.collapsedSize ?? '-'} anchors=${entry.hint.edgeAnchorCount} resolved=${entry.hint.resolvedSurfaceType ?? '-'} chains=${entry.hint.chainCount} segments=${entry.hint.segmentCount} maxSeg=${entry.hint.maxSegmentLength} maxSpan=${entry.hint.maxChainSpan ?? '-'} exactCandidates=${entry.exactCandidateCount} bestTieCount=${entry.bestTieCount} gap=${entry.bestScore !== null && entry.secondBestScore !== null ? entry.secondBestScore - entry.bestScore : '-'} selected=${entry.selected?.key ?? '-'}`,
+            `  face=${entry.hint.faceId} mode=${entry.mode} primary=${entry.hint.primarySize} collapsed=${entry.hint.collapsedSize ?? '-'} anchors=${entry.hint.edgeAnchorIds.length ? entry.hint.edgeAnchorIds.join(',') : '-'} resolved=${entry.hint.resolvedSurfaceType ?? '-'} chains=${entry.hint.chainCount} segments=${entry.hint.segmentCount} maxSeg=${entry.hint.maxSegmentLength} maxSpan=${entry.hint.maxChainSpan ?? '-'} exactCandidates=${entry.exactCandidateCount} bestTieCount=${entry.bestTieCount} gap=${entry.bestScore !== null && entry.secondBestScore !== null ? entry.secondBestScore - entry.bestScore : '-'} selected=${entry.selected?.key ?? '-'}`,
         );
         console.log(`    topChoices=${JSON.stringify(topChoices)}`);
     }

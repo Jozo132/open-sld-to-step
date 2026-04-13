@@ -328,6 +328,7 @@ export interface PsRawFaceBoundaryHint {
     primarySize: number;
     collapsedSize: number | null;
     edgeAnchorCount: number;
+    edgeAnchorIds: number[];
     resolvedSurfaceType: string | null;
     chainCount: number;
     segmentCount: number;
@@ -342,6 +343,7 @@ interface BoundaryBudgetCandidate {
     totalSize: number;
     holeCount: number;
     mappedEdgeCount: number;
+    mappedEdgeIds: number[];
     chainCount: number;
     segmentCount: number;
     maxSegmentLength: number;
@@ -929,6 +931,7 @@ export class ParasolidParser {
 
         return [...hitsByFace.entries()]
             .map(([faceId, faceHits]) => {
+                const faceRecord = faceRecords.get(faceId);
                 const primarySize = new Set(faceHits.map((hit) => hit.edgeId)).size;
                 const positionedHits = faceHits
                     .filter((hit) => hit.chainIndex !== null && hit.linearIndex !== null)
@@ -938,13 +941,16 @@ export class ParasolidParser {
                     }))
                     .sort((left, right) => left.chainIndex - right.chainIndex || left.linearIndex - right.linearIndex);
                 const spread = ParasolidParser.buildBoundarySpreadMetrics(positionedHits);
+                const edgeAnchorIds = [faceRecord?.edgeAnchorAId, faceRecord?.edgeAnchorBId]
+                    .filter((edgeId): edgeId is number => typeof edgeId === 'number' && edgeId > 0);
 
                 return {
                     faceId,
                     primarySize,
                     collapsedSize: spread.segmentCount >= 3 ? spread.segmentCount : null,
-                    edgeAnchorCount: ((faceRecords.get(faceId)?.edgeAnchorAId ? 1 : 0) + (faceRecords.get(faceId)?.edgeAnchorBId ? 1 : 0)),
-                    resolvedSurfaceType: directSurfaceTypes.get(faceRecords.get(faceId)?.geometryLikeId ?? -1) ?? null,
+                    edgeAnchorCount: edgeAnchorIds.length,
+                    edgeAnchorIds,
+                    resolvedSurfaceType: directSurfaceTypes.get(faceRecord?.geometryLikeId ?? -1) ?? null,
                     chainCount: spread.chainCount,
                     segmentCount: spread.segmentCount,
                     maxSegmentLength: spread.maxSegmentLength,
@@ -1073,12 +1079,14 @@ export class ParasolidParser {
         pointEdgePositionsByCoord: Map<string, PointEdgeChainPosition[]>,
     ): {
         mappedEdgeCount: number;
+        mappedEdgeIds: number[];
         chainCount: number;
         segmentCount: number;
         maxSegmentLength: number;
         maxChainSpan: number | null;
     } {
         const uniquePositions = new Map<string, PointEdgeChainPosition>();
+        const uniqueEdgeIds = new Set<number>();
 
         for (const vertexIndex of vertexIndices) {
             const vertex = vertices[vertexIndex];
@@ -1087,6 +1095,7 @@ export class ParasolidParser {
             const key = ParasolidParser.buildPointCoordKey(vertex.position);
             const bucket = pointEdgePositionsByCoord.get(key) ?? [];
             for (const position of bucket) {
+                uniqueEdgeIds.add(position.edgeId);
                 uniquePositions.set(
                     `${position.edgeId}:${position.chainIndex}:${position.linearIndex}`,
                     position,
@@ -1099,7 +1108,8 @@ export class ParasolidParser {
         const spread = ParasolidParser.buildBoundarySpreadMetrics(orderedPositions);
 
         return {
-            mappedEdgeCount: uniquePositions.size,
+            mappedEdgeCount: uniqueEdgeIds.size,
+            mappedEdgeIds: [...uniqueEdgeIds].sort((left, right) => left - right),
             chainCount: spread.chainCount,
             segmentCount: spread.segmentCount,
             maxSegmentLength: spread.maxSegmentLength,
@@ -1149,6 +1159,7 @@ export class ParasolidParser {
                         totalSize: cluster.length + holeCandidates.length,
                         holeCount: holeCandidates.length,
                         mappedEdgeCount: spread.mappedEdgeCount,
+                        mappedEdgeIds: spread.mappedEdgeIds,
                         chainCount: spread.chainCount,
                         segmentCount: spread.segmentCount,
                         maxSegmentLength: spread.maxSegmentLength,
@@ -1176,6 +1187,7 @@ export class ParasolidParser {
                         totalSize: ordered.length,
                         holeCount: 0,
                         mappedEdgeCount: spread.mappedEdgeCount,
+                        mappedEdgeIds: spread.mappedEdgeIds,
                         chainCount: spread.chainCount,
                         segmentCount: spread.segmentCount,
                         maxSegmentLength: spread.maxSegmentLength,
@@ -1208,6 +1220,32 @@ export class ParasolidParser {
         return penalty;
     }
 
+    /** Penalize candidates that miss explicitly anchored raw face edges. @internal */
+    private static computeBoundaryAnchorPenalty(
+        hint: PsRawFaceBoundaryHint,
+        candidate: BoundaryBudgetCandidate,
+    ): number {
+        if (hint.edgeAnchorIds.length === 0 || candidate.mappedEdgeIds.length === 0) return 0;
+
+        const mappedEdgeIds = new Set(candidate.mappedEdgeIds);
+        let matchedAnchors = 0;
+        for (const edgeAnchorId of hint.edgeAnchorIds) {
+            if (mappedEdgeIds.has(edgeAnchorId)) matchedAnchors++;
+        }
+
+        const missingAnchors = hint.edgeAnchorIds.length - matchedAnchors;
+        if (missingAnchors === 0) return 0;
+
+        const perMissingPenalty = candidate.mappedEdgeIds.length >= hint.edgeAnchorIds.length ? 45 : 15;
+        let penalty = missingAnchors * perMissingPenalty;
+
+        if (candidate.mappedEdgeIds.length >= hint.edgeAnchorIds.length && matchedAnchors === 0) {
+            penalty += 25;
+        }
+
+        return penalty;
+    }
+
     /** Score one raw face hint against one heuristic boundary candidate. @internal */
     private static scoreRawFaceBoundaryCandidate(
         hint: PsRawFaceBoundaryHint,
@@ -1233,11 +1271,12 @@ export class ParasolidParser {
         const anchorlessNonPlanePenalty = hint.edgeAnchorCount === 0 && candidate.surfaceType !== 'plane'
             ? 25
             : 0;
+        const anchorPenalty = ParasolidParser.computeBoundaryAnchorPenalty(hint, candidate);
         const spreadPenalty = ParasolidParser.computeBoundarySpreadPenalty(hint, candidate);
 
         if (candidate.outerSize === hint.primarySize) {
             return {
-                score: (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + spreadPenalty,
+                score: (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + anchorPenalty + spreadPenalty,
                 outerSize: hint.primarySize,
                 totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
                     ? hint.collapsedSize ?? undefined
@@ -1251,7 +1290,7 @@ export class ParasolidParser {
                 return null;
             }
             return {
-                score: 100 + outerDelta * 10 + (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + spreadPenalty,
+                score: 100 + outerDelta * 10 + (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + anchorPenalty + spreadPenalty,
                 outerSize: hint.primarySize,
                 totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
                     ? hint.collapsedSize ?? undefined
@@ -1261,7 +1300,7 @@ export class ParasolidParser {
 
         if (candidate.surfaceType === 'plane' && hint.collapsedSize !== null && totalDelta !== null && totalDelta <= 1) {
             return {
-                score: 200 + totalDelta * 10 + Math.min(Math.abs(candidate.outerSize - hint.primarySize), 50) + simpleAnchoredPlanePenalty,
+                score: 200 + totalDelta * 10 + Math.min(Math.abs(candidate.outerSize - hint.primarySize), 50) + simpleAnchoredPlanePenalty + anchorPenalty,
                 totalSize: hint.collapsedSize,
             };
         }
