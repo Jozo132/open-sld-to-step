@@ -303,10 +303,12 @@ export interface PsFaceEdgeHit {
     linearIndex: number | null;
 }
 
-interface RawFaceBoundaryHint {
+export interface PsRawFaceBoundaryHint {
     faceId: number;
     primarySize: number;
     collapsedSize: number | null;
+    edgeAnchorCount: number;
+    resolvedSurfaceType: string | null;
 }
 
 interface BoundaryBudgetCandidate {
@@ -871,9 +873,16 @@ export class ParasolidParser {
     }
 
     /** Collect raw face edge-hit hints for boundary matching. */
-    private buildRawFaceBoundaryHints(): RawFaceBoundaryHint[] {
+    parseRawFaceBoundaryHints(): PsRawFaceBoundaryHint[] {
+        return this.buildRawFaceBoundaryHints(this.extractSurfaces());
+    }
+
+    /** Collect derived raw face boundary hints for matching experiments. */
+    private buildRawFaceBoundaryHints(extractedSurfaces: PsSurface[] = []): PsRawFaceBoundaryHint[] {
         const hits = this.parseFaceEdgeHits();
         if (hits.length === 0) return [];
+        const faceRecords = new Map(this.parseFaceRecords().map((face) => [face.id, face]));
+        const directSurfaceTypes = new Map(extractedSurfaces.map((surface) => [surface.id, surface.surfaceType]));
 
         const hitsByFace = new Map<number, PsFaceEdgeHit[]>();
         for (const hit of hits) {
@@ -908,6 +917,8 @@ export class ParasolidParser {
                     faceId,
                     primarySize,
                     collapsedSize: collapsedSize >= 3 ? collapsedSize : null,
+                    edgeAnchorCount: ((faceRecords.get(faceId)?.edgeAnchorAId ? 1 : 0) + (faceRecords.get(faceId)?.edgeAnchorBId ? 1 : 0)),
+                    resolvedSurfaceType: directSurfaceTypes.get(faceRecords.get(faceId)?.geometryLikeId ?? -1) ?? null,
                 };
             })
             .filter((hint) => hint.primarySize >= 3)
@@ -925,16 +936,33 @@ export class ParasolidParser {
 
     /** Score one raw face hint against one heuristic boundary candidate. @internal */
     private static scoreRawFaceBoundaryCandidate(
-        hint: RawFaceBoundaryHint,
+        hint: PsRawFaceBoundaryHint,
         candidate: BoundaryBudgetCandidate,
     ): BoundaryBudgetMatchOption | null {
+        if (hint.resolvedSurfaceType && candidate.surfaceType !== hint.resolvedSurfaceType) {
+            return null;
+        }
+
         const totalDelta = hint.collapsedSize !== null
             ? Math.abs(candidate.totalSize - hint.collapsedSize)
             : null;
 
+        const simpleAnchoredPlanePenalty = hint.edgeAnchorCount >= 2
+            && hint.primarySize <= 8
+            && hint.collapsedSize !== null
+            && hint.collapsedSize >= hint.primarySize - 1
+            && candidate.surfaceType === 'plane'
+            && candidate.totalSize > candidate.outerSize
+            ? 15 + (candidate.totalSize - candidate.outerSize) * 5
+            : 0;
+
+        const anchorlessNonPlanePenalty = hint.edgeAnchorCount === 0 && candidate.surfaceType !== 'plane'
+            ? 25
+            : 0;
+
         if (candidate.outerSize === hint.primarySize) {
             return {
-                score: totalDelta ?? 0,
+                score: (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty,
                 outerSize: hint.primarySize,
                 totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
                     ? hint.collapsedSize ?? undefined
@@ -944,8 +972,11 @@ export class ParasolidParser {
 
         const outerDelta = candidate.outerSize - hint.primarySize;
         if (outerDelta >= 2 && outerDelta <= 3) {
+            if (hint.primarySize <= 3 && !hint.resolvedSurfaceType) {
+                return null;
+            }
             return {
-                score: 100 + outerDelta * 10 + (totalDelta ?? 0),
+                score: 100 + outerDelta * 10 + (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty,
                 outerSize: hint.primarySize,
                 totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
                     ? hint.collapsedSize ?? undefined
@@ -955,7 +986,7 @@ export class ParasolidParser {
 
         if (candidate.surfaceType === 'plane' && hint.collapsedSize !== null && totalDelta !== null && totalDelta <= 1) {
             return {
-                score: 200 + totalDelta * 10 + Math.min(Math.abs(candidate.outerSize - hint.primarySize), 50),
+                score: 200 + totalDelta * 10 + Math.min(Math.abs(candidate.outerSize - hint.primarySize), 50) + simpleAnchoredPlanePenalty,
                 totalSize: hint.collapsedSize,
             };
         }
@@ -1404,7 +1435,7 @@ export class ParasolidParser {
         surfaces: PsSurface[],
         vertices: PsVertex[],
         vertexSurfaceMap: Map<number, number[]>,
-        rawFaceBoundaryHints: RawFaceBoundaryHint[],
+        rawFaceBoundaryHints: PsRawFaceBoundaryHint[],
     ): Map<string, BoundaryBudgetTarget> {
         if (rawFaceBoundaryHints.length === 0) return new Map();
 
@@ -3474,7 +3505,7 @@ export class ParasolidParser {
         surfaces: PsSurface[],
         vertices: PsVertex[],
         vertexSurfaceMap: Map<number, number[]>,
-        rawFaceBoundaryHints: RawFaceBoundaryHint[] = [],
+        rawFaceBoundaryHints: PsRawFaceBoundaryHint[] = [],
     ): {
         faces: PsFace[];
         loops: PsLoop[];
@@ -3994,7 +4025,7 @@ export class ParasolidParser {
 
         // ── Vertex-surface association and bounded topology ─────────────
         const vertexSurfaceMap = this.associateVertices(surfaces, vertices);
-        const rawFaceBoundaryHints = this.buildRawFaceBoundaryHints();
+        const rawFaceBoundaryHints = this.buildRawFaceBoundaryHints(extractedSurfaces);
 
         const {
             faces, loops, edges, curves, extraVertices,

@@ -549,6 +549,62 @@ describe('ParasolidParser', () => {
         ]);
     });
 
+    it('derives stable raw face boundary hints across samples', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const hints = parser.parseRawFaceBoundaryHints();
+            expect(new Set(hints.map(hint => hint.faceId)).size).toBe(hints.length);
+            expect(hints.every(hint => hint.primarySize >= 3)).toBe(true);
+            expect(hints.every(hint => hint.collapsedSize === null || hint.collapsedSize >= 3)).toBe(true);
+            expect(hints.every(hint => hint.edgeAnchorCount >= 0 && hint.edgeAnchorCount <= 2)).toBe(true);
+        }
+    });
+
+    it('stabilizes representative raw face boundary hints', () => {
+        if (!hasSamples) return;
+
+        const ftc09Path = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_09_asme1_rd_sw1802.sldprt',
+        );
+        const ctc02Path = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ctc_02_asme1_rc_sw1802.sldprt',
+        );
+        if (!ftc09Path || !ctc02Path) return;
+
+        const ftc09Extraction = SldprtContainerParser.extractParasolid(readFileSync(ftc09Path));
+        expect(ftc09Extraction).not.toBeNull();
+        if (!ftc09Extraction) return;
+
+        const ctc02Extraction = SldprtContainerParser.extractParasolid(readFileSync(ctc02Path));
+        expect(ctc02Extraction).not.toBeNull();
+        if (!ctc02Extraction) return;
+
+        const ftc09Hints = new Map(new ParasolidParser(ftc09Extraction.data).parseRawFaceBoundaryHints().map(hint => [hint.faceId, hint]));
+        const ctc02Hints = new Map(new ParasolidParser(ctc02Extraction.data).parseRawFaceBoundaryHints().map(hint => [hint.faceId, hint]));
+
+        expect(ftc09Hints.get(1464)).toEqual({
+            faceId: 1464,
+            primarySize: 3,
+            collapsedSize: 3,
+            edgeAnchorCount: 1,
+            resolvedSurfaceType: 'cylinder',
+        });
+        expect(ctc02Hints.get(7547)).toEqual({
+            faceId: 7547,
+            primarySize: 8,
+            collapsedSize: 5,
+            edgeAnchorCount: 2,
+            resolvedSurfaceType: null,
+        });
+    });
+
     it('reconstructs ordered type-16 component chains across NIST samples', () => {
         if (!hasSamples) return;
 
