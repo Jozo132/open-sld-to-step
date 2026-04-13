@@ -3206,6 +3206,11 @@ export class ParasolidParser {
     private static readonly INFERRED_ZERO_SUPPORT_TAPER_SMALL_RADIUS_MAX = 12;
     private static readonly INFERRED_ZERO_SUPPORT_TAPER_RATIO_MIN = 1.5;
     private static readonly INFERRED_ZERO_SUPPORT_TAPER_RATIO_MAX = 1.8;
+    private static readonly INFERRED_ZERO_SUPPORT_DRILLTIP_OUTPUT_ANGLE = 59;
+    private static readonly INFERRED_ZERO_SUPPORT_DRILLTIP_GAP_MIN = 8;
+    private static readonly INFERRED_ZERO_SUPPORT_DRILLTIP_GAP_MAX = 50;
+    private static readonly INFERRED_ZERO_SUPPORT_DRILLTIP_RADIUS_MIN = 2.5;
+    private static readonly INFERRED_ZERO_SUPPORT_DRILLTIP_RADIUS_MAX = 10.5;
 
     /**
      * Maximum PCA eigenvalue ratio (λ1/λ2) for a candidate plane to be
@@ -3757,6 +3762,91 @@ export class ParasolidParser {
                 seen.add(key);
                 inferred.push(candidate);
             }
+        }
+
+        return inferred;
+    }
+
+    /**
+     * Recover 59-degree drill-tip cones from paired zero-support raw cylinder
+     * sections that are lost once same-equation cylinders are deduplicated.
+     *
+     * Clean-room observation from the public NIST samples: some blind-hole
+     * drill tips are represented only by repeated same-radius cylinder section
+     * markers. The leading section on that raw cylinder stack matches the STEP
+     * conical-surface placement directly.
+     */
+    private inferDrillTipConesFromRawCylinderSections(
+        rawSurfaces: PsSurface[],
+        vertices: PsVertex[],
+    ): PsSurface[] {
+        const cylinders = rawSurfaces.filter((surface): surface is PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        } => surface.surfaceType === 'cylinder');
+        if (cylinders.length < 2) return [];
+
+        const assoc = this.associateVertices(cylinders, vertices);
+        const zeroSupportCylinders = cylinders.filter((surface) => {
+            return (assoc.get(surface.id)?.length ?? 0) === 0 &&
+                surface.params.radius >= ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_RADIUS_MIN &&
+                surface.params.radius <= ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_RADIUS_MAX;
+        });
+        if (zeroSupportCylinders.length < 2) return [];
+
+        const inferred: PsSurface[] = [];
+        const seen = new Set<string>();
+        let nextId = rawSurfaces.reduce((maxId, surface) => Math.max(maxId, surface.id), 0) + 1;
+
+        for (const cylinder of zeroSupportCylinders) {
+            const axis = ParasolidParser.normalizeDirection(cylinder.params.axis);
+            let nearestAheadGap = Infinity;
+
+            for (const other of zeroSupportCylinders) {
+                if (other.id === cylinder.id) continue;
+                if (Math.abs(other.params.radius - cylinder.params.radius) >= ParasolidParser.CYL_RADIUS_TOL) continue;
+
+                const otherAxis = ParasolidParser.normalizeDirection(other.params.axis);
+                const dot = axis.x * otherAxis.x + axis.y * otherAxis.y + axis.z * otherAxis.z;
+                if (dot < 0.98) continue;
+                if (ParasolidParser.axisLineDistance(cylinder.params.origin, other.params.origin, axis) >
+                    ParasolidParser.INFERRED_APEX_CONE_LINE_TOL) continue;
+
+                const gap =
+                    (other.params.origin.x - cylinder.params.origin.x) * axis.x +
+                    (other.params.origin.y - cylinder.params.origin.y) * axis.y +
+                    (other.params.origin.z - cylinder.params.origin.z) * axis.z;
+                if (gap < ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_GAP_MIN ||
+                    gap > ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_GAP_MAX) continue;
+                if (gap < nearestAheadGap) nearestAheadGap = gap;
+            }
+
+            if (!isFinite(nearestAheadGap)) continue;
+
+            const key = [
+                cylinder.params.origin.x.toFixed(1),
+                cylinder.params.origin.y.toFixed(1),
+                cylinder.params.origin.z.toFixed(1),
+                axis.x.toFixed(3),
+                axis.y.toFixed(3),
+                axis.z.toFixed(3),
+                cylinder.params.radius.toFixed(2),
+                ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_OUTPUT_ANGLE.toFixed(3),
+            ].join('|');
+            if (seen.has(key)) continue;
+
+            inferred.push({
+                id: nextId,
+                surfaceType: 'cone',
+                params: {
+                    origin: cylinder.params.origin,
+                    axis,
+                    radius: cylinder.params.radius,
+                    halfAngle: ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_OUTPUT_ANGLE,
+                },
+            });
+            nextId++;
+            seen.add(key);
         }
 
         return inferred;
@@ -4637,7 +4727,10 @@ export class ParasolidParser {
         );
         // Apply narrow cone recovery after the washer pass so it sees the same
         // consolidated cylinder inventory as the bounded-topology builder.
-        const inferredCones = this.inferApexConesFromCylinderPairs(mergedSurfaces, vertices);
+        const inferredCones = [
+            ...this.inferApexConesFromCylinderPairs(mergedSurfaces, vertices),
+            ...this.inferDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices),
+        ];
         const surfaces = this.deduplicateSurfaces([...mergedSurfaces, ...inferredCones]);
 
         // Re-number deduplicated surfaces sequentially

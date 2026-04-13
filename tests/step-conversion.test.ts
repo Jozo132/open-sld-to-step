@@ -1439,6 +1439,37 @@ describe('ParasolidParser', () => {
         expect(model.surfaces.filter(s => s.surfaceType === 'cone').length).toBeGreaterThanOrEqual(12);
     });
 
+    it('recovers the CTC_01 59-degree drill-tip cones from raw cylinder sections', () => {
+        if (!ctc01Path) return;
+
+        const buf = readFileSync(ctc01Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasDrillTip = model.surfaces
+            .filter(s => s.surfaceType === 'cone')
+            .some(surface => {
+                const params = surface.params as {
+                    origin: { x: number; y: number; z: number };
+                    axis: { x: number; y: number; z: number };
+                    radius: number;
+                    halfAngle: number;
+                };
+                return Math.abs(params.origin.x - 30) < 0.1 &&
+                    Math.abs(params.origin.y + 80) < 0.1 &&
+                    Math.abs(params.origin.z + 25) < 0.1 &&
+                    Math.abs(params.axis.y + 1) < 0.01 &&
+                    Math.abs(params.radius - 10) < 0.1 &&
+                    Math.abs(params.halfAngle - 59) < 0.02;
+            });
+
+        expect(hasDrillTip).toBe(true);
+    });
+
     it('recovers the FTC_06 zero-support taper cones from raw cylinder sections', () => {
         if (!ftc06Path) return;
 
@@ -1469,6 +1500,37 @@ describe('ParasolidParser', () => {
             });
 
         expect(hasTaper).toBe(true);
+    });
+
+    it('recovers the FTC_06 59-degree drill-tip cones from raw cylinder sections', () => {
+        if (!ftc06Path) return;
+
+        const buf = readFileSync(ftc06Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasDrillTip = model.surfaces
+            .filter(s => s.surfaceType === 'cone')
+            .some(surface => {
+                const params = surface.params as {
+                    origin: { x: number; y: number; z: number };
+                    axis: { x: number; y: number; z: number };
+                    radius: number;
+                    halfAngle: number;
+                };
+                return Math.abs(params.origin.x - 76.2) < 0.1 &&
+                    Math.abs(params.origin.y - 72.39) < 0.1 &&
+                    Math.abs(params.origin.z + 158.75) < 0.1 &&
+                    Math.abs(params.axis.y - 1) < 0.01 &&
+                    Math.abs(params.radius - 3.175) < 0.1 &&
+                    Math.abs(params.halfAngle - 59) < 0.02;
+            });
+
+        expect(hasDrillTip).toBe(true);
     });
 
     it('recovers the FTC_09 micro-chamfer cones from raw cylinder origins', () => {
