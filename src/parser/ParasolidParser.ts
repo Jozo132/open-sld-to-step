@@ -1336,6 +1336,34 @@ export class ParasolidParser {
         return 8;
     }
 
+    /** Count explicit raw edge anchors recovered by a heuristic boundary candidate. @internal */
+    private static countBoundaryAnchorMatches(
+        hint: PsRawFaceBoundaryHint,
+        candidate: BoundaryBudgetCandidate,
+    ): number {
+        if (hint.edgeAnchorIds.length === 0 || candidate.mappedEdgeIds.length === 0) return 0;
+        const mappedEdgeIds = new Set(candidate.mappedEdgeIds);
+        let matches = 0;
+        for (const edgeAnchorId of hint.edgeAnchorIds) {
+            if (mappedEdgeIds.has(edgeAnchorId)) matches++;
+        }
+        return matches;
+    }
+
+    /** Count explicit raw coedge anchors recovered by a heuristic boundary candidate. @internal */
+    private static countBoundaryCoedgeMatches(
+        hint: PsRawFaceBoundaryHint,
+        candidate: BoundaryBudgetCandidate,
+    ): number {
+        if (hint.coedgeAnchorIds.length === 0 || candidate.mappedCoedgeIds.length === 0) return 0;
+        const mappedCoedgeIds = new Set(candidate.mappedCoedgeIds);
+        let matches = 0;
+        for (const coedgeAnchorId of hint.coedgeAnchorIds) {
+            if (mappedCoedgeIds.has(coedgeAnchorId)) matches++;
+        }
+        return matches;
+    }
+
     /** Score one raw face hint against one heuristic boundary candidate. @internal */
     private static scoreRawFaceBoundaryCandidate(
         hint: PsRawFaceBoundaryHint,
@@ -1366,6 +1394,8 @@ export class ParasolidParser {
         const coveragePenalty = ParasolidParser.computeBoundaryCoveragePenalty(hint, candidate);
         const repeatedHitPenalty = ParasolidParser.computeBoundaryRepeatedHitPenalty(hint, candidate);
         const spreadPenalty = ParasolidParser.computeBoundarySpreadPenalty(hint, candidate);
+        const anchorMatches = ParasolidParser.countBoundaryAnchorMatches(hint, candidate);
+        const coedgeMatches = ParasolidParser.countBoundaryCoedgeMatches(hint, candidate);
 
         if (candidate.outerSize === hint.primarySize) {
             return {
@@ -1378,6 +1408,21 @@ export class ParasolidParser {
         }
 
         const outerDelta = candidate.outerSize - hint.primarySize;
+        if (
+            outerDelta === 1
+            && hint.primarySize === 3
+            && hint.edgeAnchorCount >= 2
+            && anchorMatches > 0
+        ) {
+            return {
+                score: 80 + (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + anchorPenalty + coedgePenalty + coveragePenalty + repeatedHitPenalty + spreadPenalty,
+                outerSize: hint.primarySize,
+                totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
+                    ? hint.collapsedSize ?? undefined
+                    : undefined,
+            };
+        }
+
         if (outerDelta >= 2 && outerDelta <= 3) {
             if (hint.primarySize <= 3 && !hint.resolvedSurfaceType) {
                 return null;

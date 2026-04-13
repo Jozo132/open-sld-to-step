@@ -888,6 +888,64 @@ describe('ParasolidParser', () => {
         expect((supportingScore?.score ?? Infinity)).toBeLessThan(unsupportedScore?.score ?? -Infinity);
     });
 
+    it('allows a tiny +1 candidate when it recovers explicit anchor evidence', () => {
+        const scoreRawFaceBoundaryCandidate = (ParasolidParser as unknown as {
+            scoreRawFaceBoundaryCandidate: (hint: unknown, candidate: unknown) => { score: number } | null;
+        }).scoreRawFaceBoundaryCandidate;
+
+        const hint = {
+            faceId: 5,
+            primarySize: 3,
+            collapsedSize: 3,
+            edgeAnchorCount: 2,
+            edgeAnchorIds: [101, 202],
+            coedgeAnchorIds: [11, 22],
+            repeatedEdgeIds: [],
+            resolvedSurfaceType: null,
+            chainCount: 1,
+            segmentCount: 3,
+            maxSegmentLength: 1,
+            maxChainSpan: 30,
+        };
+        const exactCandidate = {
+            key: 'plane:9:0',
+            surfaceType: 'plane',
+            outerSize: 3,
+            totalSize: 3,
+            holeCount: 0,
+            mappedEdgeCount: 2,
+            mappedEdgeIds: [303, 404],
+            mappedCoedgeIds: [33, 44, 55],
+            chainCount: 1,
+            segmentCount: 2,
+            maxSegmentLength: 1,
+            maxChainSpan: 60,
+            matched: false,
+        };
+        const nearCandidate = {
+            key: 'cylinder:10:0',
+            surfaceType: 'cylinder',
+            outerSize: 4,
+            totalSize: 4,
+            holeCount: 0,
+            mappedEdgeCount: 4,
+            mappedEdgeIds: [101, 303, 404, 505],
+            mappedCoedgeIds: [11, 44, 55, 66],
+            chainCount: 1,
+            segmentCount: 3,
+            maxSegmentLength: 1,
+            maxChainSpan: 15,
+            matched: false,
+        };
+
+        const exactScore = scoreRawFaceBoundaryCandidate(hint, exactCandidate);
+        const nearScore = scoreRawFaceBoundaryCandidate(hint, nearCandidate);
+
+        expect(exactScore).not.toBeNull();
+        expect(nearScore).not.toBeNull();
+        expect((nearScore?.score ?? Infinity)).toBeLessThan(exactScore?.score ?? -Infinity);
+    });
+
     it('reconstructs ordered type-16 component chains across NIST samples', () => {
         if (!hasSamples) return;
 
