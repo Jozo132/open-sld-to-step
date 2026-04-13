@@ -38,6 +38,12 @@ const ctc01Path = sampleFiles.find(filePath =>
 const ctc04Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ctc_04_asme1_rd_sw1802.sldprt',
 );
+const ftc06Path = sampleFiles.find(filePath =>
+    basename(filePath).toLowerCase() === 'nist_ftc_06_asme1_rd_sw1802.sldprt',
+);
+const ftc09Path = sampleFiles.find(filePath =>
+    basename(filePath).toLowerCase() === 'nist_ftc_09_asme1_rd_sw1802.sldprt',
+);
 const ftc07Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ftc_07_asme1_rd_sw1802.sldprt',
 );
@@ -1431,6 +1437,69 @@ describe('ParasolidParser', () => {
         // Regression target from clean-room analysis: 12 reference apex cones
         // can be recovered from repeated 5mm -> 10mm coaxial cylinder steps.
         expect(model.surfaces.filter(s => s.surfaceType === 'cone').length).toBeGreaterThanOrEqual(12);
+    });
+
+    it('recovers the FTC_06 zero-support taper cones from raw cylinder sections', () => {
+        if (!ftc06Path) return;
+
+        const buf = readFileSync(ftc06Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+        const targetAngle = 9.462322208025617;
+
+        const hasTaper = model.surfaces
+            .filter(s => s.surfaceType === 'cone')
+            .some(surface => {
+                const params = surface.params as {
+                    origin: { x: number; y: number; z: number };
+                    axis: { x: number; y: number; z: number };
+                    radius: number;
+                    halfAngle: number;
+                };
+                return Math.abs(params.origin.x - 76.2) < 0.1 &&
+                    Math.abs(params.origin.y - 85.09) < 0.1 &&
+                    Math.abs(params.origin.z + 158.75) < 0.1 &&
+                    Math.abs(params.axis.y + 1) < 0.01 &&
+                    Math.abs(params.radius - 9.525) < 0.1 &&
+                    Math.abs(params.halfAngle - targetAngle) < 0.02;
+            });
+
+        expect(hasTaper).toBe(true);
+    });
+
+    it('recovers the FTC_09 micro-chamfer cones from raw cylinder origins', () => {
+        if (!ftc09Path) return;
+
+        const buf = readFileSync(ftc09Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasChamfer = model.surfaces
+            .filter(s => s.surfaceType === 'cone')
+            .some(surface => {
+                const params = surface.params as {
+                    origin: { x: number; y: number; z: number };
+                    axis: { x: number; y: number; z: number };
+                    radius: number;
+                    halfAngle: number;
+                };
+                return Math.abs(params.origin.x + 82.55) < 0.1 &&
+                    Math.abs(params.origin.y - 2.27584) < 0.1 &&
+                    Math.abs(params.origin.z + 107.95) < 0.1 &&
+                    Math.abs(params.axis.y - 1) < 0.01 &&
+                    Math.abs(params.radius - 2.9718) < 0.1 &&
+                        Math.abs(params.halfAngle - 45) < 0.02;
+            });
+
+        expect(hasChamfer).toBe(true);
     });
 });
 
