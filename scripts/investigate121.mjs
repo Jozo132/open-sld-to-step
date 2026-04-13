@@ -244,7 +244,7 @@ for (const filePath of sampleFiles) {
         }));
 
         console.log(
-            `  face=${entry.hint.faceId} mode=${entry.mode} primary=${entry.hint.primarySize} collapsed=${entry.hint.collapsedSize ?? '-'} anchors=${entry.hint.edgeAnchorCount} resolved=${entry.hint.resolvedSurfaceType ?? '-'} exactCandidates=${entry.exactCandidateCount} bestTieCount=${entry.bestTieCount} gap=${entry.bestScore !== null && entry.secondBestScore !== null ? entry.secondBestScore - entry.bestScore : '-'} selected=${entry.selected?.key ?? '-'}`,
+            `  face=${entry.hint.faceId} mode=${entry.mode} primary=${entry.hint.primarySize} collapsed=${entry.hint.collapsedSize ?? '-'} anchors=${entry.hint.edgeAnchorCount} resolved=${entry.hint.resolvedSurfaceType ?? '-'} chains=${entry.hint.chainCount} segments=${entry.hint.segmentCount} maxSeg=${entry.hint.maxSegmentLength} maxSpan=${entry.hint.maxChainSpan ?? '-'} exactCandidates=${entry.exactCandidateCount} bestTieCount=${entry.bestTieCount} gap=${entry.bestScore !== null && entry.secondBestScore !== null ? entry.secondBestScore - entry.bestScore : '-'} selected=${entry.selected?.key ?? '-'}`,
         );
         console.log(`    topChoices=${JSON.stringify(topChoices)}`);
     }

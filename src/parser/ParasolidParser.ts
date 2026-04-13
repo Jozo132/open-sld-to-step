@@ -309,6 +309,10 @@ export interface PsRawFaceBoundaryHint {
     collapsedSize: number | null;
     edgeAnchorCount: number;
     resolvedSurfaceType: string | null;
+    chainCount: number;
+    segmentCount: number;
+    maxSegmentLength: number;
+    maxChainSpan: number | null;
 }
 
 interface BoundaryBudgetCandidate {
@@ -894,6 +898,7 @@ export class ParasolidParser {
         return [...hitsByFace.entries()]
             .map(([faceId, faceHits]) => {
                 const primarySize = new Set(faceHits.map((hit) => hit.edgeId)).size;
+                const chainRanges = new Map<number, { min: number; max: number }>();
                 const positionedHits = faceHits
                     .filter((hit) => hit.chainIndex !== null && hit.linearIndex !== null)
                     .map((hit) => ({
@@ -906,11 +911,28 @@ export class ParasolidParser {
 
                 let collapsedSize = 0;
                 let previous: { chainIndex: number; linearIndex: number } | null = null;
+                let maxSegmentLength = 0;
+                let currentSegmentLength = 0;
                 for (const point of positionedHits) {
+                    const range = chainRanges.get(point.chainIndex) ?? { min: point.linearIndex, max: point.linearIndex };
+                    range.min = Math.min(range.min, point.linearIndex);
+                    range.max = Math.max(range.max, point.linearIndex);
+                    chainRanges.set(point.chainIndex, range);
+
                     if (!previous || point.chainIndex !== previous.chainIndex || point.linearIndex - previous.linearIndex > 1) {
                         collapsedSize++;
+                        currentSegmentLength = 1;
+                    } else {
+                        currentSegmentLength++;
                     }
+                    if (currentSegmentLength > maxSegmentLength) maxSegmentLength = currentSegmentLength;
                     previous = point;
+                }
+
+                let maxChainSpan: number | null = null;
+                for (const range of chainRanges.values()) {
+                    const span = range.max - range.min + 1;
+                    if (maxChainSpan === null || span > maxChainSpan) maxChainSpan = span;
                 }
 
                 return {
@@ -919,6 +941,10 @@ export class ParasolidParser {
                     collapsedSize: collapsedSize >= 3 ? collapsedSize : null,
                     edgeAnchorCount: ((faceRecords.get(faceId)?.edgeAnchorAId ? 1 : 0) + (faceRecords.get(faceId)?.edgeAnchorBId ? 1 : 0)),
                     resolvedSurfaceType: directSurfaceTypes.get(faceRecords.get(faceId)?.geometryLikeId ?? -1) ?? null,
+                    chainCount: chainRanges.size,
+                    segmentCount: collapsedSize,
+                    maxSegmentLength,
+                    maxChainSpan,
                 };
             })
             .filter((hint) => hint.primarySize >= 3)

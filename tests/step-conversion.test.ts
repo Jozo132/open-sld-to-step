@@ -564,6 +564,10 @@ describe('ParasolidParser', () => {
             expect(hints.every(hint => hint.primarySize >= 3)).toBe(true);
             expect(hints.every(hint => hint.collapsedSize === null || hint.collapsedSize >= 3)).toBe(true);
             expect(hints.every(hint => hint.edgeAnchorCount >= 0 && hint.edgeAnchorCount <= 2)).toBe(true);
+            expect(hints.every(hint => hint.chainCount >= 0)).toBe(true);
+            expect(hints.every(hint => hint.segmentCount >= 0)).toBe(true);
+            expect(hints.every(hint => hint.maxSegmentLength >= 0)).toBe(true);
+            expect(hints.every(hint => hint.maxChainSpan === null || hint.maxChainSpan >= 1)).toBe(true);
         }
     });
 
@@ -595,6 +599,10 @@ describe('ParasolidParser', () => {
             collapsedSize: 3,
             edgeAnchorCount: 1,
             resolvedSurfaceType: 'cylinder',
+            chainCount: 1,
+            segmentCount: 3,
+            maxSegmentLength: 1,
+            maxChainSpan: 7,
         });
         expect(ctc02Hints.get(7547)).toEqual({
             faceId: 7547,
@@ -602,6 +610,10 @@ describe('ParasolidParser', () => {
             collapsedSize: 5,
             edgeAnchorCount: 2,
             resolvedSurfaceType: null,
+            chainCount: 1,
+            segmentCount: 5,
+            maxSegmentLength: 4,
+            maxChainSpan: 305,
         });
     });
 
