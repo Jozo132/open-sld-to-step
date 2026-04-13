@@ -12,8 +12,8 @@ A **clean-room** Node.js / TypeScript library that:
 1. **No proprietary APIs.** All code must rely on standard stream parsing and public ISO specifications. Do not hallucinate or reference Dassault Systèmes or Siemens proprietary SDKs, headers, or documentation.
 2. **Clean-room only.** See `LEGAL.md` for the full legal notice. All parsing is based on [MS-CFB], ISO 10303, public Parasolid schema references, and observable byte-level structure of public-domain NIST test files.
 3. **Investigation scripts** go into `./scripts/investigate#.mjs` where `#` is the next serial number (currently 1–72 exist). These are disposable `.mjs` files for binary exploration — run with `node scripts/investigate#.mjs`.
-4. **Memory budget.** Tests run with `--max-old-space-size=1024`. Jest is configured with `maxWorkers: 1` and `workerIdleMemoryLimit: '256MB'`. Do not cache large buffers across test suites — use `afterAll()` to clear caches.
-5. **Windows host.** The dev machine is Windows. Use `./node_modules/jest/bin/jest.js` (not `node_modules/.bin/jest` which is a bash shim). All npm scripts already handle this.
+4. **Memory budget.** The default npm test path prefers Bun when available and falls back to Jest. Keep the Jest fallback at `--max-old-space-size=1024`, with `maxWorkers: 1` and `workerIdleMemoryLimit: '256MB'`. Do not cache large buffers across test suites — use `afterAll()` to clear caches.
+5. **Windows host.** The dev machine is Windows. Use `npm test`/`npm run test:integration` for the preferred Bun-or-Jest path, or `./node_modules/jest/bin/jest.js` for the explicit Jest fallback (not `node_modules/.bin/jest` which is a bash shim).
 
 ## Project Layout
 
@@ -51,8 +51,10 @@ output/                             # Generated STEP files (not in git)
 
 | Command | Purpose |
 |---------|---------|
-| `npm test` | Run all tests (Jest, ESM, ts-jest) |
-| `npm run test:integration` | Run only `brep-extraction.test.ts` |
+| `npm test` | Run all tests, preferring Bun and falling back to Jest |
+| `npm run test:bun` | Run all tests explicitly with Bun |
+| `npm run test:jest` | Run all tests explicitly with Jest |
+| `npm run test:integration` | Run only `brep-extraction.test.ts` with the preferred runner |
 | `npm run build` | TypeScript → `dist/` |
 | `npm run lint` | Type-check without emit |
 | `npm run convert` | Build + batch-convert all NIST .SLDPRT → .stp in `./output/` |
