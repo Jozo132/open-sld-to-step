@@ -38,6 +38,9 @@ const ctc01Path = sampleFiles.find(filePath =>
 const ctc04Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ctc_04_asme1_rd_sw1802.sldprt',
 );
+const ftc07Path = sampleFiles.find(filePath =>
+    basename(filePath).toLowerCase() === 'nist_ftc_07_asme1_rd_sw1802.sldprt',
+);
 const ftc11Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ftc_11_asme1_rb_sw1802.sldprt',
 );
@@ -57,6 +60,22 @@ function getCachedConversion(filePath: string): ConversionResult | null {
     const result = convertSldprtToStep(buf, basename(filePath));
     conversionCache.set(filePath, result);
     return result;
+}
+
+function legacyRawScanStart(buf: Buffer): number {
+    let dataStart = 0x400;
+    for (let offset = Math.min(0x1000, buf.length) - 1; offset >= 0x60; offset--) {
+        if (buf[offset] === 0x5a) {
+            dataStart = offset + 1;
+            break;
+        }
+    }
+
+    return dataStart;
+}
+
+function getRawScanStart(parser: ParasolidParser): number {
+    return (parser as unknown as { resolveFullScanStart(): number }).resolveFullScanStart();
 }
 
 // ── ParasolidParser unit tests ──────────────────────────────────────────────
@@ -133,6 +152,89 @@ describe('ParasolidParser', () => {
             expect(metadata.firstEntityOffset!).toBeLessThan(metadata.firstSentinelOffset!);
             expect(metadata.firstEntityOffset!).toBeGreaterThanOrEqual(metadata.metadataEndOffset);
         }
+    });
+
+    it('uses the decoded metadata boundary for markerless raw scans across NIST samples', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const metadata = parser.parseSchemaMetadata();
+
+            expect(metadata).not.toBeNull();
+            if (!metadata) continue;
+
+            const legacyStart = legacyRawScanStart(extraction.data);
+            const scanStart = getRawScanStart(parser);
+            expect(scanStart).toBe(Math.max(legacyStart, metadata.metadataEndOffset));
+            expect(scanStart).toBeGreaterThanOrEqual(metadata.schemaTerminatorOffset);
+        }
+    });
+
+    it('promotes the raw-scan start when trusted metadata ends after the legacy cutoff', () => {
+        const buf = Buffer.alloc(2048);
+        buf[900] = 0x5a;
+
+        const parser = new ParasolidParser(buf);
+        (parser as unknown as {
+            parseSchemaMetadata: () => {
+                schemaId: string;
+                schemaOffset: number;
+                schemaTerminatorOffset: number;
+                metadataEndOffset: number;
+                firstEntityOffset: number | null;
+                firstEntityHeader: null;
+                firstSentinelOffset: number | null;
+                fieldDefinitions: unknown[];
+                namedClasses: unknown[];
+            };
+        }).parseSchemaMetadata = () => ({
+            schemaId: 'SCH_TEST',
+            schemaOffset: 0,
+            schemaTerminatorOffset: 100,
+            metadataEndOffset: 1500,
+            firstEntityOffset: null,
+            firstEntityHeader: null,
+            firstSentinelOffset: null,
+            fieldDefinitions: [],
+            namedClasses: [],
+        });
+
+        expect(getRawScanStart(parser)).toBe(1500);
+    });
+
+    it('caps FTC_07 metadata before the first packed body record', () => {
+        if (!ftc07Path) return;
+
+        const buf = readFileSync(ftc07Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const metadata = parser.parseSchemaMetadata();
+
+        expect(metadata).not.toBeNull();
+        if (!metadata) return;
+
+        expect(metadata.metadataEndOffset).toBe(1678);
+        expect(metadata.firstEntityOffset).toBe(1686);
+        expect(metadata.firstEntityHeader).toMatchObject({ offset: 1686, format: 'packed', type: 30, id: 16 });
+    });
+
+    it('falls back to the legacy raw-scan boundary when schema metadata is unavailable', () => {
+        const buf = Buffer.alloc(2048);
+        buf[900] = 0x5a;
+
+        const parser = new ParasolidParser(buf);
+
+        expect(parser.parseSchemaMetadata()).toBeNull();
+        expect(getRawScanStart(parser)).toBe(901);
     });
 
     it('parses sentinel-aligned linear records across NIST samples', () => {

@@ -629,11 +629,6 @@ export class ParasolidParser {
         );
 
         let metadataEndOffset = schemaTerminatorOffset + 1;
-        const lastSchemaTerminator = this.findLastSchemaTerminator(
-            schemaTerminatorOffset + 1,
-            schemaRegionEnd,
-        );
-        if (lastSchemaTerminator >= 0) metadataEndOffset = lastSchemaTerminator + 1;
         for (const fieldDefinition of fieldDefinitions) {
             if (fieldDefinition.endOffset > metadataEndOffset) {
                 metadataEndOffset = fieldDefinition.endOffset;
@@ -643,6 +638,13 @@ export class ParasolidParser {
             if (namedClass.endOffset > metadataEndOffset) {
                 metadataEndOffset = namedClass.endOffset;
             }
+        }
+        const trailingSchemaTerminator = this.findLastSchemaTerminator(
+            metadataEndOffset,
+            Math.min(schemaRegionEnd, metadataEndOffset + 64),
+        );
+        if (trailingSchemaTerminator >= 0) {
+            metadataEndOffset = trailingSchemaTerminator + 1;
         }
 
         const firstEntityHeader = this.findFirstLinearEntityHeader(
@@ -2273,6 +2275,34 @@ export class ParasolidParser {
         return points;
     }
 
+    /** Resolve the safest start offset for markerless float scanning. @internal */
+    private resolveFullScanStart(): number {
+        let legacyStart = 0x400;
+        for (let offset = Math.min(0x1000, this.buf.length) - 1; offset >= 0x60; offset--) {
+            if (this.buf[offset] === 0x5a) {
+                legacyStart = offset + 1;
+                break;
+            }
+        }
+
+        const metadata = this.parseSchemaMetadata();
+        if (metadata &&
+            metadata.metadataEndOffset >= 0 &&
+            metadata.metadataEndOffset < this.buf.length &&
+            (metadata.firstSentinelOffset === null || metadata.metadataEndOffset < metadata.firstSentinelOffset) &&
+            (metadata.firstEntityOffset === null || (
+                metadata.firstEntityHeader?.offset === metadata.firstEntityOffset &&
+                metadata.firstEntityOffset >= metadata.metadataEndOffset &&
+                (metadata.firstSentinelOffset === null || metadata.firstEntityOffset < metadata.firstSentinelOffset)
+            ))) {
+            // The first standard linear header can appear after packed entity-1
+            // payload bytes, but FTC_11 still needs the historical later cut.
+            return Math.max(legacyStart, Math.max(0x60, metadata.metadataEndOffset));
+        }
+
+        return legacyStart;
+    }
+
     /**
      * Fallback: scan the full buffer for BE float64 triplets (no markers).
      * Uses stricter checks: at least one component must have |val| > 0.001.
@@ -2283,16 +2313,9 @@ export class ParasolidParser {
         const points: PsPoint[] = [];
         const seen = new Set<string>();
 
-        // Skip past the header + schema + class definitions using the stable
-        // last-'Z' heuristic for now. The schema metadata decoder is still
-        // observational and is not yet trusted to drive the raw float scan.
-        let dataStart = 0x400;  // Conservative default
-        for (let i = Math.min(0x1000, buf.length) - 1; i >= 0x60; i--) {
-            if (buf[i] === 0x5a) { // 'Z' — schema end marker
-                dataStart = i + 1;
-                break;
-            }
-        }
+        // Prefer the decoded schema boundary when it is internally consistent,
+        // otherwise keep the historical last-'Z' fallback.
+        const dataStart = this.resolveFullScanStart();
 
         for (let j = dataStart; j + 24 <= buf.length; j++) {
             const pt = this.tryReadTriplet(buf, j);
