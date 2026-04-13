@@ -329,6 +329,7 @@ export interface PsRawFaceBoundaryHint {
     collapsedSize: number | null;
     edgeAnchorCount: number;
     edgeAnchorIds: number[];
+    coedgeAnchorIds: number[];
     resolvedSurfaceType: string | null;
     chainCount: number;
     segmentCount: number;
@@ -344,6 +345,7 @@ interface BoundaryBudgetCandidate {
     holeCount: number;
     mappedEdgeCount: number;
     mappedEdgeIds: number[];
+    mappedCoedgeIds: number[];
     chainCount: number;
     segmentCount: number;
     maxSegmentLength: number;
@@ -364,9 +366,10 @@ interface BoundaryBudgetMatchOption {
 }
 
 interface PointEdgeChainPosition {
-    edgeId: number;
-    chainIndex: number;
-    linearIndex: number;
+    coedgeId: number;
+    edgeId: number | null;
+    chainIndex: number | null;
+    linearIndex: number | null;
 }
 
 /** Dominant compact type-30/type-31 record with four leading refs and a geometry marker. */
@@ -943,6 +946,8 @@ export class ParasolidParser {
                 const spread = ParasolidParser.buildBoundarySpreadMetrics(positionedHits);
                 const edgeAnchorIds = [faceRecord?.edgeAnchorAId, faceRecord?.edgeAnchorBId]
                     .filter((edgeId): edgeId is number => typeof edgeId === 'number' && edgeId > 0);
+                const coedgeAnchorIds = [faceRecord?.coedgeAnchorAId, faceRecord?.coedgeAnchorBId]
+                    .filter((coedgeId): coedgeId is number => typeof coedgeId === 'number' && coedgeId > 0);
 
                 return {
                     faceId,
@@ -950,6 +955,7 @@ export class ParasolidParser {
                     collapsedSize: spread.segmentCount >= 3 ? spread.segmentCount : null,
                     edgeAnchorCount: edgeAnchorIds.length,
                     edgeAnchorIds,
+                    coedgeAnchorIds,
                     resolvedSurfaceType: directSurfaceTypes.get(faceRecord?.geometryLikeId ?? -1) ?? null,
                     chainCount: spread.chainCount,
                     segmentCount: spread.segmentCount,
@@ -1040,8 +1046,6 @@ export class ParasolidParser {
             if (bucket.length === 1) uniqueEdgeByFirstRef.set(firstRefId, bucket[0]);
         }
 
-        if (uniqueEdgeByFirstRef.size === 0) return new Map();
-
         const edgePositions = this.buildEdgeChainPositionMap();
         const positionsByCoord = new Map<string, PointEdgeChainPosition[]>();
 
@@ -1050,10 +1054,7 @@ export class ParasolidParser {
             if (!coedge) continue;
 
             const edge = uniqueEdgeByFirstRef.get(coedge.curveLikeId);
-            if (!edge) continue;
-
-            const edgePosition = edgePositions.get(edge.id);
-            if (!edgePosition) continue;
+            const edgePosition = edge ? edgePositions.get(edge.id) : undefined;
 
             const key = ParasolidParser.buildPointCoordKey({
                 x: point.position.x * PS_TO_MM,
@@ -1062,9 +1063,10 @@ export class ParasolidParser {
             });
             const bucket = positionsByCoord.get(key) ?? [];
             bucket.push({
-                edgeId: edge.id,
-                chainIndex: edgePosition.chainIndex,
-                linearIndex: edgePosition.linearIndex,
+                coedgeId: coedge.id,
+                edgeId: edge?.id ?? null,
+                chainIndex: edgePosition?.chainIndex ?? null,
+                linearIndex: edgePosition?.linearIndex ?? null,
             });
             positionsByCoord.set(key, bucket);
         }
@@ -1080,6 +1082,7 @@ export class ParasolidParser {
     ): {
         mappedEdgeCount: number;
         mappedEdgeIds: number[];
+        mappedCoedgeIds: number[];
         chainCount: number;
         segmentCount: number;
         maxSegmentLength: number;
@@ -1087,6 +1090,7 @@ export class ParasolidParser {
     } {
         const uniquePositions = new Map<string, PointEdgeChainPosition>();
         const uniqueEdgeIds = new Set<number>();
+        const uniqueCoedgeIds = new Set<number>();
 
         for (const vertexIndex of vertexIndices) {
             const vertex = vertices[vertexIndex];
@@ -1095,21 +1099,32 @@ export class ParasolidParser {
             const key = ParasolidParser.buildPointCoordKey(vertex.position);
             const bucket = pointEdgePositionsByCoord.get(key) ?? [];
             for (const position of bucket) {
-                uniqueEdgeIds.add(position.edgeId);
-                uniquePositions.set(
-                    `${position.edgeId}:${position.chainIndex}:${position.linearIndex}`,
-                    position,
-                );
+                uniqueCoedgeIds.add(position.coedgeId);
+                if (position.edgeId !== null) uniqueEdgeIds.add(position.edgeId);
+                if (position.edgeId !== null && position.chainIndex !== null && position.linearIndex !== null) {
+                    uniquePositions.set(
+                        `${position.edgeId}:${position.chainIndex}:${position.linearIndex}`,
+                        position,
+                    );
+                }
             }
         }
 
         const orderedPositions = [...uniquePositions.values()]
-            .sort((left, right) => left.chainIndex - right.chainIndex || left.linearIndex - right.linearIndex);
+            .sort((left, right) => {
+                return (left.chainIndex as number) - (right.chainIndex as number)
+                    || (left.linearIndex as number) - (right.linearIndex as number);
+            })
+            .map((position) => ({
+                chainIndex: position.chainIndex as number,
+                linearIndex: position.linearIndex as number,
+            }));
         const spread = ParasolidParser.buildBoundarySpreadMetrics(orderedPositions);
 
         return {
             mappedEdgeCount: uniqueEdgeIds.size,
             mappedEdgeIds: [...uniqueEdgeIds].sort((left, right) => left - right),
+            mappedCoedgeIds: [...uniqueCoedgeIds].sort((left, right) => left - right),
             chainCount: spread.chainCount,
             segmentCount: spread.segmentCount,
             maxSegmentLength: spread.maxSegmentLength,
@@ -1160,6 +1175,7 @@ export class ParasolidParser {
                         holeCount: holeCandidates.length,
                         mappedEdgeCount: spread.mappedEdgeCount,
                         mappedEdgeIds: spread.mappedEdgeIds,
+                        mappedCoedgeIds: spread.mappedCoedgeIds,
                         chainCount: spread.chainCount,
                         segmentCount: spread.segmentCount,
                         maxSegmentLength: spread.maxSegmentLength,
@@ -1188,6 +1204,7 @@ export class ParasolidParser {
                         holeCount: 0,
                         mappedEdgeCount: spread.mappedEdgeCount,
                         mappedEdgeIds: spread.mappedEdgeIds,
+                        mappedCoedgeIds: spread.mappedCoedgeIds,
                         chainCount: spread.chainCount,
                         segmentCount: spread.segmentCount,
                         maxSegmentLength: spread.maxSegmentLength,
@@ -1246,6 +1263,32 @@ export class ParasolidParser {
         return penalty;
     }
 
+    /** Penalize candidates that miss explicitly anchored raw face coedges. @internal */
+    private static computeBoundaryCoedgePenalty(
+        hint: PsRawFaceBoundaryHint,
+        candidate: BoundaryBudgetCandidate,
+    ): number {
+        if (hint.coedgeAnchorIds.length === 0 || candidate.mappedCoedgeIds.length === 0) return 0;
+
+        const mappedCoedgeIds = new Set(candidate.mappedCoedgeIds);
+        let matchedAnchors = 0;
+        for (const coedgeAnchorId of hint.coedgeAnchorIds) {
+            if (mappedCoedgeIds.has(coedgeAnchorId)) matchedAnchors++;
+        }
+
+        const missingAnchors = hint.coedgeAnchorIds.length - matchedAnchors;
+        if (missingAnchors === 0) return 0;
+
+        const perMissingPenalty = candidate.mappedCoedgeIds.length >= hint.coedgeAnchorIds.length ? 18 : 6;
+        let penalty = missingAnchors * perMissingPenalty;
+
+        if (candidate.mappedCoedgeIds.length >= hint.coedgeAnchorIds.length && matchedAnchors === 0) {
+            penalty += 10;
+        }
+
+        return penalty;
+    }
+
     /** Score one raw face hint against one heuristic boundary candidate. @internal */
     private static scoreRawFaceBoundaryCandidate(
         hint: PsRawFaceBoundaryHint,
@@ -1272,11 +1315,12 @@ export class ParasolidParser {
             ? 25
             : 0;
         const anchorPenalty = ParasolidParser.computeBoundaryAnchorPenalty(hint, candidate);
+        const coedgePenalty = ParasolidParser.computeBoundaryCoedgePenalty(hint, candidate);
         const spreadPenalty = ParasolidParser.computeBoundarySpreadPenalty(hint, candidate);
 
         if (candidate.outerSize === hint.primarySize) {
             return {
-                score: (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + anchorPenalty + spreadPenalty,
+                score: (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + anchorPenalty + coedgePenalty + spreadPenalty,
                 outerSize: hint.primarySize,
                 totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
                     ? hint.collapsedSize ?? undefined
@@ -1290,7 +1334,7 @@ export class ParasolidParser {
                 return null;
             }
             return {
-                score: 100 + outerDelta * 10 + (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + anchorPenalty + spreadPenalty,
+                score: 100 + outerDelta * 10 + (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + anchorPenalty + coedgePenalty + spreadPenalty,
                 outerSize: hint.primarySize,
                 totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
                     ? hint.collapsedSize ?? undefined
@@ -1300,7 +1344,7 @@ export class ParasolidParser {
 
         if (candidate.surfaceType === 'plane' && hint.collapsedSize !== null && totalDelta !== null && totalDelta <= 1) {
             return {
-                score: 200 + totalDelta * 10 + Math.min(Math.abs(candidate.outerSize - hint.primarySize), 50) + simpleAnchoredPlanePenalty + anchorPenalty,
+                score: 200 + totalDelta * 10 + Math.min(Math.abs(candidate.outerSize - hint.primarySize), 50) + simpleAnchoredPlanePenalty + anchorPenalty + coedgePenalty,
                 totalSize: hint.collapsedSize,
             };
         }

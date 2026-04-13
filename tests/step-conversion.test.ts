@@ -596,6 +596,7 @@ describe('ParasolidParser', () => {
             expect(hints.every(hint => hint.collapsedSize === null || hint.collapsedSize >= 3)).toBe(true);
             expect(hints.every(hint => hint.edgeAnchorCount >= 0 && hint.edgeAnchorCount <= 2)).toBe(true);
             expect(hints.every(hint => hint.edgeAnchorIds.length === hint.edgeAnchorCount)).toBe(true);
+            expect(hints.every(hint => hint.coedgeAnchorIds.length <= 2)).toBe(true);
             expect(hints.every(hint => hint.chainCount >= 0)).toBe(true);
             expect(hints.every(hint => hint.segmentCount >= 0)).toBe(true);
             expect(hints.every(hint => hint.maxSegmentLength >= 0)).toBe(true);
@@ -631,6 +632,7 @@ describe('ParasolidParser', () => {
             collapsedSize: 3,
             edgeAnchorCount: 1,
             edgeAnchorIds: [1114],
+            coedgeAnchorIds: [256],
             resolvedSurfaceType: 'cylinder',
             chainCount: 1,
             segmentCount: 3,
@@ -643,6 +645,7 @@ describe('ParasolidParser', () => {
             collapsedSize: 5,
             edgeAnchorCount: 2,
             edgeAnchorIds: [7211, 7418],
+            coedgeAnchorIds: [366, 375],
             resolvedSurfaceType: null,
             chainCount: 1,
             segmentCount: 5,
@@ -662,6 +665,7 @@ describe('ParasolidParser', () => {
             collapsedSize: 4,
             edgeAnchorCount: 2,
             edgeAnchorIds: [101, 202],
+            coedgeAnchorIds: [],
             resolvedSurfaceType: null,
             chainCount: 1,
             segmentCount: 4,
@@ -676,6 +680,7 @@ describe('ParasolidParser', () => {
             holeCount: 0,
             mappedEdgeCount: 4,
             mappedEdgeIds: [101, 202, 303, 404],
+            mappedCoedgeIds: [],
             chainCount: 1,
             segmentCount: 4,
             maxSegmentLength: 1,
@@ -690,10 +695,68 @@ describe('ParasolidParser', () => {
             holeCount: 0,
             mappedEdgeCount: 4,
             mappedEdgeIds: [303, 404, 505, 606],
+            mappedCoedgeIds: [],
             chainCount: 1,
             segmentCount: 4,
             maxSegmentLength: 1,
             maxChainSpan: 20,
+            matched: false,
+        };
+
+        const matchingScore = scoreRawFaceBoundaryCandidate(hint, matchingCandidate);
+        const nonMatchingScore = scoreRawFaceBoundaryCandidate(hint, nonMatchingCandidate);
+
+        expect(matchingScore).not.toBeNull();
+        expect(nonMatchingScore).not.toBeNull();
+        expect((matchingScore?.score ?? Infinity)).toBeLessThan(nonMatchingScore?.score ?? -Infinity);
+    });
+
+    it('prefers candidates that contain the explicit raw face coedge anchors when edge anchors cannot help', () => {
+        const scoreRawFaceBoundaryCandidate = (ParasolidParser as unknown as {
+            scoreRawFaceBoundaryCandidate: (hint: unknown, candidate: unknown) => { score: number } | null;
+        }).scoreRawFaceBoundaryCandidate;
+
+        const hint = {
+            faceId: 2,
+            primarySize: 6,
+            collapsedSize: 5,
+            edgeAnchorCount: 0,
+            edgeAnchorIds: [],
+            coedgeAnchorIds: [11, 22],
+            resolvedSurfaceType: null,
+            chainCount: 1,
+            segmentCount: 5,
+            maxSegmentLength: 2,
+            maxChainSpan: 90,
+        };
+        const matchingCandidate = {
+            key: 'plane:3:0',
+            surfaceType: 'plane',
+            outerSize: 6,
+            totalSize: 6,
+            holeCount: 0,
+            mappedEdgeCount: 0,
+            mappedEdgeIds: [],
+            mappedCoedgeIds: [11, 22, 33],
+            chainCount: 0,
+            segmentCount: 0,
+            maxSegmentLength: 0,
+            maxChainSpan: null,
+            matched: false,
+        };
+        const nonMatchingCandidate = {
+            key: 'plane:4:0',
+            surfaceType: 'plane',
+            outerSize: 6,
+            totalSize: 6,
+            holeCount: 0,
+            mappedEdgeCount: 0,
+            mappedEdgeIds: [],
+            mappedCoedgeIds: [33, 44, 55],
+            chainCount: 0,
+            segmentCount: 0,
+            maxSegmentLength: 0,
+            maxChainSpan: null,
             matched: false,
         };
 
