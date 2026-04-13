@@ -210,6 +210,37 @@ describe('ParasolidParser', () => {
         }
     });
 
+    it('decodes structural point records across NIST samples', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const coedges = parser.parseCoedgeRecords();
+            const points = parser.parsePointRecords();
+            const pointIds = new Set(points.map(record => record.id));
+            const vertexResolved = coedges.filter(record => pointIds.has(record.vertexPointId)).length;
+
+            expect(pointIds.size).toBe(points.length);
+            expect(points.every(record => Number.isFinite(record.position.x))).toBe(true);
+            expect(points.every(record => Number.isFinite(record.position.y))).toBe(true);
+            expect(points.every(record => Number.isFinite(record.position.z))).toBe(true);
+
+            if (basename(filePath).toLowerCase() === 'nist_ftc_11_asme1_rb_sw1802.sldprt') {
+                expect(coedges).toHaveLength(0);
+                expect(points).toHaveLength(0);
+                continue;
+            }
+
+            expect(points.length).toBeGreaterThan(0);
+            expect(points.length - vertexResolved).toBeLessThanOrEqual(1);
+        }
+    });
+
     it('stabilizes the first decoded CTC_01 coedge and point links', () => {
         if (!ctc01Path) return;
 

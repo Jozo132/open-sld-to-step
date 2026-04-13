@@ -83,50 +83,7 @@ function buildParserState(parser) {
     surfaces.forEach((surface, index) => { surface.id = index + 1; });
 
     const vertexSurfaceMap = parser.associateVertices(surfaces, vertices);
-    const cylSurfaces = surfaces.filter(
-        (surface) => surface.surfaceType === 'cylinder' || surface.surfaceType === 'cone',
-    );
-
-    const candidates = [];
-    for (const surface of surfaces) {
-        const assocIndices = vertexSurfaceMap.get(surface.id) ?? [];
-        const params = surface.params;
-
-        if (surface.surfaceType === 'plane') {
-            const clusters = parser.buildPlaneBoundaryClusters(params.origin, params.normal, assocIndices, vertices);
-            clusters.forEach((cluster, clusterIndex) => {
-                const holes = parser.collectPlaneHoleCandidates(
-                    params.origin,
-                    params.normal,
-                    cluster,
-                    cylSurfaces,
-                    vertices,
-                    vertexSurfaceMap,
-                );
-                candidates.push({
-                    key: ParasolidParser.buildBoundaryBudgetKey('plane', surface.id, clusterIndex),
-                    surfaceType: 'plane',
-                    outerSize: cluster.length,
-                    totalSize: cluster.length + holes.length,
-                    holeCount: holes.length,
-                });
-            });
-            continue;
-        }
-
-        if (surface.surfaceType === 'cylinder' || surface.surfaceType === 'cone') {
-            const ordered = parser.buildAngularBoundaryPoints(params.origin, params.axis, assocIndices, vertices);
-            if (ordered.length >= 3) {
-                candidates.push({
-                    key: ParasolidParser.buildBoundaryBudgetKey(surface.surfaceType, surface.id),
-                    surfaceType: surface.surfaceType,
-                    outerSize: ordered.length,
-                    totalSize: ordered.length,
-                    holeCount: 0,
-                });
-            }
-        }
-    }
+    const candidates = parser.buildBoundaryBudgetCandidates(surfaces, vertices, vertexSurfaceMap);
 
     return { vertices, extractedSurfaces, surfaces, vertexSurfaceMap, candidates };
 }
@@ -238,6 +195,11 @@ for (const filePath of sampleFiles) {
             outerSize: option.candidate.outerSize,
             totalSize: option.candidate.totalSize,
             holeCount: option.candidate.holeCount,
+            mappedEdges: option.candidate.mappedEdgeCount,
+            chains: option.candidate.chainCount,
+            segments: option.candidate.segmentCount,
+            maxSeg: option.candidate.maxSegmentLength,
+            maxSpan: option.candidate.maxChainSpan,
             score: option.match.score,
             outerTarget: option.match.outerSize ?? null,
             totalTarget: option.match.totalSize ?? null,

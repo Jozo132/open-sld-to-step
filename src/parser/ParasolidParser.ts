@@ -255,6 +255,26 @@ export interface PsEdgeComponentChain {
     orderedComponents: PsEdgeComponent[];
 }
 
+/** Structural POINT record decoded from the point entity stream. */
+export interface PsPointRecord {
+    /** Byte offset where the point record starts. */
+    offset: number;
+    /** Whether the point came from a sentinel block or packed pre-sentinel zone. */
+    format: 'sentinel' | 'packed';
+    /** Raw point entity id. */
+    id: number;
+    /** Raw flags/reference word preserved from the record header. */
+    flags: number;
+    /** Next coedge-like reference carried by the point record. */
+    nextCoedgeId: number;
+    /** Next point in the linked point chain. */
+    nextPointId: number;
+    /** Previous point in the linked point chain. */
+    prevPointId: number;
+    /** Best-effort float64 triplet preserved from the point payload. */
+    position: PsPoint;
+}
+
 /** Minimal raw face record decoded from sentinel-block sub-records. */
 export interface PsFaceRecord {
     /** Byte offset of the underlying raw face entity. */
@@ -320,6 +340,12 @@ interface BoundaryBudgetCandidate {
     surfaceType: string;
     outerSize: number;
     totalSize: number;
+    holeCount: number;
+    mappedEdgeCount: number;
+    chainCount: number;
+    segmentCount: number;
+    maxSegmentLength: number;
+    maxChainSpan: number | null;
     matched: boolean;
 }
 
@@ -333,6 +359,12 @@ interface BoundaryBudgetMatchOption {
     score: number;
     outerSize?: number;
     totalSize?: number;
+}
+
+interface PointEdgeChainPosition {
+    edgeId: number;
+    chainIndex: number;
+    linearIndex: number;
 }
 
 /** Dominant compact type-30/type-31 record with four leading refs and a geometry marker. */
@@ -898,53 +930,25 @@ export class ParasolidParser {
         return [...hitsByFace.entries()]
             .map(([faceId, faceHits]) => {
                 const primarySize = new Set(faceHits.map((hit) => hit.edgeId)).size;
-                const chainRanges = new Map<number, { min: number; max: number }>();
                 const positionedHits = faceHits
                     .filter((hit) => hit.chainIndex !== null && hit.linearIndex !== null)
                     .map((hit) => ({
                         chainIndex: hit.chainIndex as number,
                         linearIndex: hit.linearIndex as number,
                     }))
-                    .sort((left, right) => {
-                        return left.chainIndex - right.chainIndex || left.linearIndex - right.linearIndex;
-                    });
-
-                let collapsedSize = 0;
-                let previous: { chainIndex: number; linearIndex: number } | null = null;
-                let maxSegmentLength = 0;
-                let currentSegmentLength = 0;
-                for (const point of positionedHits) {
-                    const range = chainRanges.get(point.chainIndex) ?? { min: point.linearIndex, max: point.linearIndex };
-                    range.min = Math.min(range.min, point.linearIndex);
-                    range.max = Math.max(range.max, point.linearIndex);
-                    chainRanges.set(point.chainIndex, range);
-
-                    if (!previous || point.chainIndex !== previous.chainIndex || point.linearIndex - previous.linearIndex > 1) {
-                        collapsedSize++;
-                        currentSegmentLength = 1;
-                    } else {
-                        currentSegmentLength++;
-                    }
-                    if (currentSegmentLength > maxSegmentLength) maxSegmentLength = currentSegmentLength;
-                    previous = point;
-                }
-
-                let maxChainSpan: number | null = null;
-                for (const range of chainRanges.values()) {
-                    const span = range.max - range.min + 1;
-                    if (maxChainSpan === null || span > maxChainSpan) maxChainSpan = span;
-                }
+                    .sort((left, right) => left.chainIndex - right.chainIndex || left.linearIndex - right.linearIndex);
+                const spread = ParasolidParser.buildBoundarySpreadMetrics(positionedHits);
 
                 return {
                     faceId,
                     primarySize,
-                    collapsedSize: collapsedSize >= 3 ? collapsedSize : null,
+                    collapsedSize: spread.segmentCount >= 3 ? spread.segmentCount : null,
                     edgeAnchorCount: ((faceRecords.get(faceId)?.edgeAnchorAId ? 1 : 0) + (faceRecords.get(faceId)?.edgeAnchorBId ? 1 : 0)),
                     resolvedSurfaceType: directSurfaceTypes.get(faceRecords.get(faceId)?.geometryLikeId ?? -1) ?? null,
-                    chainCount: chainRanges.size,
-                    segmentCount: collapsedSize,
-                    maxSegmentLength,
-                    maxChainSpan,
+                    chainCount: spread.chainCount,
+                    segmentCount: spread.segmentCount,
+                    maxSegmentLength: spread.maxSegmentLength,
+                    maxChainSpan: spread.maxChainSpan,
                 };
             })
             .filter((hint) => hint.primarySize >= 3)
@@ -958,6 +962,250 @@ export class ParasolidParser {
     /** Build a stable key for a heuristic boundary candidate. @internal */
     private static buildBoundaryBudgetKey(surfaceType: string, surfaceId: number, variant = 0): string {
         return `${surfaceType}:${surfaceId}:${variant}`;
+    }
+
+    /** Build a stable coordinate key for matching decoded structural points back to mm-space vertices. @internal */
+    private static buildPointCoordKey(point: PsPoint): string {
+        return `${point.x.toFixed(6)},${point.y.toFixed(6)},${point.z.toFixed(6)}`;
+    }
+
+    /** Collapse ordered chain positions into spread metrics shared by raw hints and heuristic candidates. @internal */
+    private static buildBoundarySpreadMetrics(
+        positionedHits: Array<{ chainIndex: number; linearIndex: number }>,
+    ): {
+        chainCount: number;
+        segmentCount: number;
+        maxSegmentLength: number;
+        maxChainSpan: number | null;
+    } {
+        const chainRanges = new Map<number, { min: number; max: number }>();
+        let segmentCount = 0;
+        let previous: { chainIndex: number; linearIndex: number } | null = null;
+        let maxSegmentLength = 0;
+        let currentSegmentLength = 0;
+
+        for (const point of positionedHits) {
+            const range = chainRanges.get(point.chainIndex) ?? { min: point.linearIndex, max: point.linearIndex };
+            range.min = Math.min(range.min, point.linearIndex);
+            range.max = Math.max(range.max, point.linearIndex);
+            chainRanges.set(point.chainIndex, range);
+
+            if (!previous || point.chainIndex !== previous.chainIndex || point.linearIndex - previous.linearIndex > 1) {
+                segmentCount++;
+                currentSegmentLength = 1;
+            } else {
+                currentSegmentLength++;
+            }
+            if (currentSegmentLength > maxSegmentLength) maxSegmentLength = currentSegmentLength;
+            previous = point;
+        }
+
+        let maxChainSpan: number | null = null;
+        for (const range of chainRanges.values()) {
+            const span = range.max - range.min + 1;
+            if (maxChainSpan === null || span > maxChainSpan) maxChainSpan = span;
+        }
+
+        return {
+            chainCount: chainRanges.size,
+            segmentCount,
+            maxSegmentLength,
+            maxChainSpan,
+        };
+    }
+
+    /** Project structural point records onto decoded edge-chain positions keyed by mm-space coordinates. @internal */
+    private buildPointEdgeChainPositionsByCoord(): Map<string, PointEdgeChainPosition[]> {
+        const pointRecords = this.parsePointRecords();
+        if (pointRecords.length === 0) return new Map();
+
+        const coedgeById = new Map(this.parseCoedgeRecords().map((record) => [record.id, record]));
+        if (coedgeById.size === 0) return new Map();
+
+        const edgeRefBuckets = new Map<number, PsEdgeRecord[]>();
+        for (const edge of this.parseEdgeRecords()) {
+            const bucket = edgeRefBuckets.get(edge.firstRefId) ?? [];
+            bucket.push(edge);
+            edgeRefBuckets.set(edge.firstRefId, bucket);
+        }
+
+        const uniqueEdgeByFirstRef = new Map<number, PsEdgeRecord>();
+        for (const [firstRefId, bucket] of edgeRefBuckets) {
+            if (bucket.length === 1) uniqueEdgeByFirstRef.set(firstRefId, bucket[0]);
+        }
+
+        if (uniqueEdgeByFirstRef.size === 0) return new Map();
+
+        const edgePositions = this.buildEdgeChainPositionMap();
+        const positionsByCoord = new Map<string, PointEdgeChainPosition[]>();
+
+        for (const point of pointRecords) {
+            const coedge = coedgeById.get(point.nextCoedgeId);
+            if (!coedge) continue;
+
+            const edge = uniqueEdgeByFirstRef.get(coedge.curveLikeId);
+            if (!edge) continue;
+
+            const edgePosition = edgePositions.get(edge.id);
+            if (!edgePosition) continue;
+
+            const key = ParasolidParser.buildPointCoordKey({
+                x: point.position.x * PS_TO_MM,
+                y: point.position.y * PS_TO_MM,
+                z: point.position.z * PS_TO_MM,
+            });
+            const bucket = positionsByCoord.get(key) ?? [];
+            bucket.push({
+                edgeId: edge.id,
+                chainIndex: edgePosition.chainIndex,
+                linearIndex: edgePosition.linearIndex,
+            });
+            positionsByCoord.set(key, bucket);
+        }
+
+        return positionsByCoord;
+    }
+
+    /** Derive candidate-side spread metrics from boundary vertices that map back to edge-chain positions. @internal */
+    private buildBoundaryCandidateSpread(
+        vertexIndices: number[],
+        vertices: PsVertex[],
+        pointEdgePositionsByCoord: Map<string, PointEdgeChainPosition[]>,
+    ): {
+        mappedEdgeCount: number;
+        chainCount: number;
+        segmentCount: number;
+        maxSegmentLength: number;
+        maxChainSpan: number | null;
+    } {
+        const uniquePositions = new Map<string, PointEdgeChainPosition>();
+
+        for (const vertexIndex of vertexIndices) {
+            const vertex = vertices[vertexIndex];
+            if (!vertex) continue;
+
+            const key = ParasolidParser.buildPointCoordKey(vertex.position);
+            const bucket = pointEdgePositionsByCoord.get(key) ?? [];
+            for (const position of bucket) {
+                uniquePositions.set(
+                    `${position.edgeId}:${position.chainIndex}:${position.linearIndex}`,
+                    position,
+                );
+            }
+        }
+
+        const orderedPositions = [...uniquePositions.values()]
+            .sort((left, right) => left.chainIndex - right.chainIndex || left.linearIndex - right.linearIndex);
+        const spread = ParasolidParser.buildBoundarySpreadMetrics(orderedPositions);
+
+        return {
+            mappedEdgeCount: uniquePositions.size,
+            chainCount: spread.chainCount,
+            segmentCount: spread.segmentCount,
+            maxSegmentLength: spread.maxSegmentLength,
+            maxChainSpan: spread.maxChainSpan,
+        };
+    }
+
+    /** Build heuristic boundary candidates plus candidate-side spread metrics. @internal */
+    private buildBoundaryBudgetCandidates(
+        surfaces: PsSurface[],
+        vertices: PsVertex[],
+        vertexSurfaceMap: Map<number, number[]>,
+    ): BoundaryBudgetCandidate[] {
+        const candidates: BoundaryBudgetCandidate[] = [];
+        const cylSurfaces = surfaces.filter(
+            (surface) => surface.surfaceType === 'cylinder' || surface.surfaceType === 'cone',
+        );
+        const pointEdgePositionsByCoord = this.buildPointEdgeChainPositionsByCoord();
+
+        for (const surf of surfaces) {
+            const assocIndices = vertexSurfaceMap.get(surf.id) ?? [];
+            const params = surf.params as Record<string, unknown>;
+
+            if (surf.surfaceType === 'plane') {
+                const origin = params.origin as PsPoint;
+                const normal = params.normal as PsPoint;
+                const clusters = this.buildPlaneBoundaryClusters(origin, normal, assocIndices, vertices);
+
+                clusters.forEach((cluster, clusterIndex) => {
+                    const holeCandidates = this.collectPlaneHoleCandidates(
+                        origin,
+                        normal,
+                        cluster,
+                        cylSurfaces,
+                        vertices,
+                        vertexSurfaceMap,
+                    );
+                    const spread = this.buildBoundaryCandidateSpread(
+                        cluster.map((point) => point.idx),
+                        vertices,
+                        pointEdgePositionsByCoord,
+                    );
+                    candidates.push({
+                        key: ParasolidParser.buildBoundaryBudgetKey('plane', surf.id, clusterIndex),
+                        surfaceType: 'plane',
+                        outerSize: cluster.length,
+                        totalSize: cluster.length + holeCandidates.length,
+                        holeCount: holeCandidates.length,
+                        mappedEdgeCount: spread.mappedEdgeCount,
+                        chainCount: spread.chainCount,
+                        segmentCount: spread.segmentCount,
+                        maxSegmentLength: spread.maxSegmentLength,
+                        maxChainSpan: spread.maxChainSpan,
+                        matched: false,
+                    });
+                });
+                continue;
+            }
+
+            if (surf.surfaceType === 'cylinder' || surf.surfaceType === 'cone') {
+                const origin = params.origin as PsPoint;
+                const axis = params.axis as PsPoint;
+                const ordered = this.buildAngularBoundaryPoints(origin, axis, assocIndices, vertices);
+                if (ordered.length >= 3) {
+                    const spread = this.buildBoundaryCandidateSpread(
+                        ordered.map((point) => point.idx),
+                        vertices,
+                        pointEdgePositionsByCoord,
+                    );
+                    candidates.push({
+                        key: ParasolidParser.buildBoundaryBudgetKey(surf.surfaceType, surf.id),
+                        surfaceType: surf.surfaceType,
+                        outerSize: ordered.length,
+                        totalSize: ordered.length,
+                        holeCount: 0,
+                        mappedEdgeCount: spread.mappedEdgeCount,
+                        chainCount: spread.chainCount,
+                        segmentCount: spread.segmentCount,
+                        maxSegmentLength: spread.maxSegmentLength,
+                        maxChainSpan: spread.maxChainSpan,
+                        matched: false,
+                    });
+                }
+            }
+        }
+
+        return candidates;
+    }
+
+    /** Compute a conservative penalty from candidate-side spread metrics. @internal */
+    private static computeBoundarySpreadPenalty(
+        hint: PsRawFaceBoundaryHint,
+        candidate: BoundaryBudgetCandidate,
+    ): number {
+        if (candidate.mappedEdgeCount < 3) return 0;
+
+        let penalty = 0;
+        penalty += Math.abs(candidate.chainCount - hint.chainCount) * 30;
+        penalty += Math.abs(candidate.segmentCount - hint.segmentCount) * 8;
+        penalty += Math.abs(candidate.maxSegmentLength - hint.maxSegmentLength) * 3;
+
+        if (hint.maxChainSpan !== null && candidate.maxChainSpan !== null) {
+            penalty += Math.min(Math.round(Math.abs(candidate.maxChainSpan - hint.maxChainSpan) / 25), 40);
+        }
+
+        return penalty;
     }
 
     /** Score one raw face hint against one heuristic boundary candidate. @internal */
@@ -985,10 +1233,11 @@ export class ParasolidParser {
         const anchorlessNonPlanePenalty = hint.edgeAnchorCount === 0 && candidate.surfaceType !== 'plane'
             ? 25
             : 0;
+        const spreadPenalty = ParasolidParser.computeBoundarySpreadPenalty(hint, candidate);
 
         if (candidate.outerSize === hint.primarySize) {
             return {
-                score: (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty,
+                score: (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + spreadPenalty,
                 outerSize: hint.primarySize,
                 totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
                     ? hint.collapsedSize ?? undefined
@@ -1002,7 +1251,7 @@ export class ParasolidParser {
                 return null;
             }
             return {
-                score: 100 + outerDelta * 10 + (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty,
+                score: 100 + outerDelta * 10 + (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + spreadPenalty,
                 outerSize: hint.primarySize,
                 totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
                     ? hint.collapsedSize ?? undefined
@@ -1465,55 +1714,7 @@ export class ParasolidParser {
     ): Map<string, BoundaryBudgetTarget> {
         if (rawFaceBoundaryHints.length === 0) return new Map();
 
-        const candidates: BoundaryBudgetCandidate[] = [];
-        const cylSurfaces = surfaces.filter(
-            (surface) => surface.surfaceType === 'cylinder' || surface.surfaceType === 'cone',
-        );
-
-        for (const surf of surfaces) {
-            const assocIndices = vertexSurfaceMap.get(surf.id) ?? [];
-            const params = surf.params as Record<string, unknown>;
-
-            if (surf.surfaceType === 'plane') {
-                const origin = params.origin as PsPoint;
-                const normal = params.normal as PsPoint;
-                const clusters = this.buildPlaneBoundaryClusters(origin, normal, assocIndices, vertices);
-
-                clusters.forEach((cluster, clusterIndex) => {
-                    const holeCandidates = this.collectPlaneHoleCandidates(
-                        origin,
-                        normal,
-                        cluster,
-                        cylSurfaces,
-                        vertices,
-                        vertexSurfaceMap,
-                    );
-                    candidates.push({
-                        key: ParasolidParser.buildBoundaryBudgetKey('plane', surf.id, clusterIndex),
-                        surfaceType: 'plane',
-                        outerSize: cluster.length,
-                        totalSize: cluster.length + holeCandidates.length,
-                        matched: false,
-                    });
-                });
-                continue;
-            }
-
-            if (surf.surfaceType === 'cylinder' || surf.surfaceType === 'cone') {
-                const origin = params.origin as PsPoint;
-                const axis = params.axis as PsPoint;
-                const ordered = this.buildAngularBoundaryPoints(origin, axis, assocIndices, vertices);
-                if (ordered.length >= 3) {
-                    candidates.push({
-                        key: ParasolidParser.buildBoundaryBudgetKey(surf.surfaceType, surf.id),
-                        surfaceType: surf.surfaceType,
-                        outerSize: ordered.length,
-                        totalSize: ordered.length,
-                        matched: false,
-                    });
-                }
-            }
-        }
+        const candidates = this.buildBoundaryBudgetCandidates(surfaces, vertices, vertexSurfaceMap);
 
         const targets = new Map<string, BoundaryBudgetTarget>();
         const plans = rawFaceBoundaryHints
@@ -1563,6 +1764,40 @@ export class ParasolidParser {
         for (const sentinelOffset of this.findEightByteSentinelOffsets()) {
             const record = this.parseGapPointRecordAfterSentinel(sentinelOffset);
             if (record) records.push(record);
+        }
+
+        return records;
+    }
+
+    /** Decode structural POINT records with stable ids and linked coedge refs. */
+    parsePointRecords(): PsPointRecord[] {
+        const records: PsPointRecord[] = [];
+        const seen = new Set<number>();
+        const buf = this.buf;
+
+        const sentPositions: number[] = [];
+        let idx = 0;
+        while ((idx = buf.indexOf(SENTINEL, idx)) >= 0) {
+            sentPositions.push(idx);
+            idx += SENTINEL.length;
+        }
+
+        const packedEnd = sentPositions.length > 0 ? sentPositions[0] : buf.length;
+        this.extractPackedPointRecords(0, packedEnd, records, seen);
+
+        for (let i = 0; i < sentPositions.length; i++) {
+            const blockStart = sentPositions[i] + SENTINEL.length;
+            const blockEnd = i + 1 < sentPositions.length
+                ? sentPositions[i + 1]
+                : buf.length;
+
+            for (let offset = blockStart; offset + POINT_COORD_OFFSET + 24 <= blockEnd; offset++) {
+                const record = this.parseSentinelPointRecordAtOffset(offset);
+                if (!record || seen.has(record.id)) continue;
+                records.push(record);
+                seen.add(record.id);
+                offset += POINT_COORD_OFFSET + 23;
+            }
         }
 
         return records;
@@ -1683,6 +1918,22 @@ export class ParasolidParser {
         }
     }
 
+    /** Decode packed structural point records from a byte range outside sentinel blocks. @internal */
+    private extractPackedPointRecords(
+        start: number,
+        end: number,
+        records: PsPointRecord[],
+        seen: Set<number>,
+    ): void {
+        for (let offset = start; offset + POINT_COORD_OFFSET + 24 <= end; offset++) {
+            const record = this.parsePackedPointRecordAtOffset(offset);
+            if (!record || seen.has(record.id)) continue;
+            records.push(record);
+            seen.add(record.id);
+            offset += POINT_COORD_OFFSET + 23;
+        }
+    }
+
     /** Validate the standard sentinel-block POINT record layout. @internal */
     private isSentinelPointRecord(offset: number): boolean {
         const buf = this.buf;
@@ -1711,6 +1962,44 @@ export class ParasolidParser {
         }
 
         return this.tryReadTriplet(buf, offset + POINT_COORD_OFFSET) !== null;
+    }
+
+    /** Decode one sentinel-block point record at a known structural offset. @internal */
+    private parseSentinelPointRecordAtOffset(offset: number): PsPointRecord | null {
+        if (!this.isSentinelPointRecord(offset)) return null;
+
+        const position = this.tryReadTriplet(this.buf, offset + POINT_COORD_OFFSET);
+        if (!position) return null;
+
+        return {
+            offset,
+            format: 'sentinel',
+            id: this.buf.readUInt16BE(offset + 2),
+            flags: this.buf.readUInt16BE(offset + 6),
+            nextCoedgeId: this.buf.readUInt16BE(offset + 10),
+            nextPointId: this.buf.readUInt16BE(offset + 12),
+            prevPointId: this.buf.readUInt16BE(offset + 14),
+            position,
+        };
+    }
+
+    /** Decode one packed structural point record at a known structural offset. @internal */
+    private parsePackedPointRecordAtOffset(offset: number): PsPointRecord | null {
+        if (!this.isPackedPointRecord(offset)) return null;
+
+        const position = this.tryReadTriplet(this.buf, offset + POINT_COORD_OFFSET);
+        if (!position) return null;
+
+        return {
+            offset,
+            format: 'packed',
+            id: this.buf.readUInt16BE(offset + 3),
+            flags: this.buf.readUInt16BE(offset + 7),
+            nextCoedgeId: this.buf.readUInt16BE(offset + 8),
+            nextPointId: this.buf.readUInt16BE(offset + 10),
+            prevPointId: this.buf.readUInt16BE(offset + 12),
+            position,
+        };
     }
 
     /** Deduplicate and append a point read from a known coordinate offset. @internal */
