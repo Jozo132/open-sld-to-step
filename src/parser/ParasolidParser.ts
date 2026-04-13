@@ -303,6 +303,32 @@ export interface PsFaceEdgeHit {
     linearIndex: number | null;
 }
 
+interface RawFaceBoundaryHint {
+    faceId: number;
+    primarySize: number;
+    collapsedSize: number | null;
+}
+
+interface BoundaryBudgetCandidate {
+    key: string;
+    surfaceType: string;
+    outerSize: number;
+    totalSize: number;
+    matched: boolean;
+}
+
+interface BoundaryBudgetTarget {
+    rawFaceId: number;
+    outerSize?: number;
+    totalSize?: number;
+}
+
+interface BoundaryBudgetMatchOption {
+    score: number;
+    outerSize?: number;
+    totalSize?: number;
+}
+
 /** Dominant compact type-30/type-31 record with four leading refs and a geometry marker. */
 export interface PsCompactGeometryRecord {
     /** Byte offset where the compact header starts. */
@@ -845,7 +871,7 @@ export class ParasolidParser {
     }
 
     /** Collect raw face edge-hit hints for boundary matching. */
-    private buildRawFaceBoundaryHints(): Array<{ faceId: number; primarySize: number; collapsedSize: number | null }> {
+    private buildRawFaceBoundaryHints(): RawFaceBoundaryHint[] {
         const hits = this.parseFaceEdgeHits();
         if (hits.length === 0) return [];
 
@@ -895,6 +921,46 @@ export class ParasolidParser {
     /** Build a stable key for a heuristic boundary candidate. @internal */
     private static buildBoundaryBudgetKey(surfaceType: string, surfaceId: number, variant = 0): string {
         return `${surfaceType}:${surfaceId}:${variant}`;
+    }
+
+    /** Score one raw face hint against one heuristic boundary candidate. @internal */
+    private static scoreRawFaceBoundaryCandidate(
+        hint: RawFaceBoundaryHint,
+        candidate: BoundaryBudgetCandidate,
+    ): BoundaryBudgetMatchOption | null {
+        const totalDelta = hint.collapsedSize !== null
+            ? Math.abs(candidate.totalSize - hint.collapsedSize)
+            : null;
+
+        if (candidate.outerSize === hint.primarySize) {
+            return {
+                score: totalDelta ?? 0,
+                outerSize: hint.primarySize,
+                totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
+                    ? hint.collapsedSize ?? undefined
+                    : undefined,
+            };
+        }
+
+        const outerDelta = candidate.outerSize - hint.primarySize;
+        if (outerDelta >= 2 && outerDelta <= 3) {
+            return {
+                score: 100 + outerDelta * 10 + (totalDelta ?? 0),
+                outerSize: hint.primarySize,
+                totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
+                    ? hint.collapsedSize ?? undefined
+                    : undefined,
+            };
+        }
+
+        if (candidate.surfaceType === 'plane' && hint.collapsedSize !== null && totalDelta !== null && totalDelta <= 1) {
+            return {
+                score: 200 + totalDelta * 10 + Math.min(Math.abs(candidate.outerSize - hint.primarySize), 50),
+                totalSize: hint.collapsedSize,
+            };
+        }
+
+        return null;
     }
 
     /** Recover ordered type-16 components from the observed prev/next links. */
@@ -1338,11 +1404,11 @@ export class ParasolidParser {
         surfaces: PsSurface[],
         vertices: PsVertex[],
         vertexSurfaceMap: Map<number, number[]>,
-        rawFaceBoundaryHints: Array<{ faceId: number; primarySize: number; collapsedSize: number | null }>,
-    ): Map<string, { outerSize?: number; totalSize?: number }> {
+        rawFaceBoundaryHints: RawFaceBoundaryHint[],
+    ): Map<string, BoundaryBudgetTarget> {
         if (rawFaceBoundaryHints.length === 0) return new Map();
 
-        const candidates: Array<{ key: string; outerSize: number; totalSize: number; matched: boolean }> = [];
+        const candidates: BoundaryBudgetCandidate[] = [];
         const cylSurfaces = surfaces.filter(
             (surface) => surface.surfaceType === 'cylinder' || surface.surfaceType === 'cone',
         );
@@ -1367,6 +1433,7 @@ export class ParasolidParser {
                     );
                     candidates.push({
                         key: ParasolidParser.buildBoundaryBudgetKey('plane', surf.id, clusterIndex),
+                        surfaceType: 'plane',
                         outerSize: cluster.length,
                         totalSize: cluster.length + holeCandidates.length,
                         matched: false,
@@ -1382,6 +1449,7 @@ export class ParasolidParser {
                 if (ordered.length >= 3) {
                     candidates.push({
                         key: ParasolidParser.buildBoundaryBudgetKey(surf.surfaceType, surf.id),
+                        surfaceType: surf.surfaceType,
                         outerSize: ordered.length,
                         totalSize: ordered.length,
                         matched: false,
@@ -1390,68 +1458,42 @@ export class ParasolidParser {
             }
         }
 
-        const targets = new Map<string, { outerSize?: number; totalSize?: number }>();
+        const targets = new Map<string, BoundaryBudgetTarget>();
+        const plans = rawFaceBoundaryHints
+            .map((hint) => {
+                const options = candidates
+                    .map((candidate) => {
+                        const match = ParasolidParser.scoreRawFaceBoundaryCandidate(hint, candidate);
+                        if (!match) return null;
+                        return { candidate, match };
+                    })
+                    .filter((entry): entry is { candidate: BoundaryBudgetCandidate; match: BoundaryBudgetMatchOption } => entry !== null)
+                    .sort((left, right) => {
+                        return left.match.score - right.match.score
+                            || left.candidate.totalSize - right.candidate.totalSize
+                            || left.candidate.outerSize - right.candidate.outerSize
+                            || left.candidate.key.localeCompare(right.candidate.key);
+                    });
+                return { hint, options };
+            })
+            .filter((plan) => plan.options.length > 0)
+            .sort((left, right) => {
+                return left.options.length - right.options.length
+                    || left.options[0].match.score - right.options[0].match.score
+                    || right.hint.primarySize - left.hint.primarySize
+                    || right.hint.faceId - left.hint.faceId;
+            });
 
-        const recordTarget = (
-            candidate: { key: string; outerSize: number; totalSize: number; matched: boolean },
-            target: { outerSize?: number; totalSize?: number },
-        ): void => {
-            candidate.matched = true;
-            const existing = targets.get(candidate.key) ?? {};
-            targets.set(candidate.key, { ...existing, ...target });
-        };
+        for (const plan of plans) {
+            const selected = plan.options.find((option) => !option.candidate.matched);
+            if (!selected) continue;
 
-        const findBestCandidate = (
-            size: number,
-            metric: 'outer' | 'total',
-            mode: 'exact' | 'near' | 'cap',
-        ): { candidate: { key: string; outerSize: number; totalSize: number; matched: boolean }; delta: number } | null => {
-            let bestCandidate: { key: string; outerSize: number; totalSize: number; matched: boolean } | null = null;
-            let bestDelta = Infinity;
-
-            for (const candidate of candidates) {
-                if (candidate.matched) continue;
-                const candidateSize = metric === 'outer' ? candidate.outerSize : candidate.totalSize;
-                const delta = candidateSize - size;
-
-                if (mode === 'exact' && delta !== 0) continue;
-                if (mode === 'near' && (delta < 2 || delta > 3)) continue;
-                if (mode === 'cap' && Math.abs(delta) > 1) continue;
-
-                const scoreDelta = mode === 'cap' ? Math.abs(delta) : delta;
-                if (scoreDelta < bestDelta) {
-                    bestDelta = scoreDelta;
-                    bestCandidate = candidate;
-                }
-            }
-
-            if (!bestCandidate) return null;
-            return { candidate: bestCandidate, delta: bestDelta };
-        };
-
-        for (const hint of rawFaceBoundaryHints) {
-            const exactOuter = findBestCandidate(hint.primarySize, 'outer', 'exact');
-            if (exactOuter) {
-                const totalTarget = hint.collapsedSize !== null && Math.abs(exactOuter.candidate.totalSize - hint.collapsedSize) <= 1
-                    ? hint.collapsedSize
-                    : undefined;
-                recordTarget(exactOuter.candidate, { outerSize: hint.primarySize, totalSize: totalTarget });
-            }
-        }
-
-        for (const hint of rawFaceBoundaryHints) {
-            if (hint.collapsedSize === null) continue;
-            const cappedTotal = findBestCandidate(hint.collapsedSize, 'total', 'cap');
-            if (cappedTotal) {
-                recordTarget(cappedTotal.candidate, { totalSize: hint.collapsedSize });
-            }
-        }
-
-        for (const hint of rawFaceBoundaryHints) {
-            const nearOuter = findBestCandidate(hint.primarySize, 'outer', 'near');
-            if (nearOuter) {
-                recordTarget(nearOuter.candidate, { outerSize: hint.primarySize });
-            }
+            selected.candidate.matched = true;
+            targets.set(selected.candidate.key, {
+                rawFaceId: plan.hint.faceId,
+                outerSize: selected.match.outerSize,
+                totalSize: selected.match.totalSize,
+            });
         }
 
         return targets;
@@ -3432,7 +3474,7 @@ export class ParasolidParser {
         surfaces: PsSurface[],
         vertices: PsVertex[],
         vertexSurfaceMap: Map<number, number[]>,
-        rawFaceBoundaryHints: Array<{ faceId: number; primarySize: number; collapsedSize: number | null }> = [],
+        rawFaceBoundaryHints: RawFaceBoundaryHint[] = [],
     ): {
         faces: PsFace[];
         loops: PsLoop[];
