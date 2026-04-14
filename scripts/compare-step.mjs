@@ -20,6 +20,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ─── STEP Parser ──────────────────────────────────────────────────────────────
 /** Parse a STEP file into a map of id → { type, args (raw string) } */
@@ -386,6 +387,27 @@ function coneDist(a, b) {
     return dist3(a.origin, b.origin);
 }
 
+function deduplicateByKey(items, keyFn) {
+    const seen = new Set();
+    const unique = [];
+    for (const item of items) {
+        const key = keyFn(item);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(item);
+    }
+    return unique;
+}
+
+function conePlacementKey(cone) {
+    return [
+        ...cone.origin.map(v => v.toFixed(4)),
+        ...cone.axis.map(v => v.toFixed(6)),
+        cone.radius.toFixed(4),
+        cone.semiAngle.toFixed(6),
+    ].join('|');
+}
+
 function faceDist(a, b) {
     if (a.surfType !== b.surfType) return Infinity;
     const holePenalty = Math.abs(a.innerCount - b.innerCount) * 10;
@@ -604,8 +626,13 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
     let refGeom = extractGeometry(refEntities, refAngleScale);
     if (genScale !== 1.0) genGeom = scaleGeometry(genGeom, genScale);
     if (refScale !== 1.0) refGeom = scaleGeometry(refGeom, refScale);
+    const genUniqueCones = deduplicateByKey(genGeom.cones, conePlacementKey);
+    const refUniqueCones = deduplicateByKey(refGeom.cones, conePlacementKey);
     log(`  Units: generated=${genScale === 1 ? 'mm' : genScale === 25.4 ? 'in' : genScale + 'x'}  reference=${refScale === 1 ? 'mm' : refScale === 25.4 ? 'in' : refScale + 'x'}`);
     log(`  Plane-angle units: generated=${genAngleScale === 1 ? 'rad' : `${genAngleScale.toFixed(6)}rad/unit`}  reference=${refAngleScale === 1 ? 'rad' : `${refAngleScale.toFixed(6)}rad/unit`}`);
+    if (genUniqueCones.length !== genGeom.cones.length || refUniqueCones.length !== refGeom.cones.length) {
+        log(`  Cone matching collapses exact duplicate placements: generated=${genGeom.cones.length}→${genUniqueCones.length}  reference=${refGeom.cones.length}→${refUniqueCones.length}`);
+    }
 
 
     function reportMatch(label, genArr, refArr, distFn, maxDist) {
@@ -636,7 +663,7 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
 
     const planeResult = reportMatch('PLANE', genGeom.planes, refGeom.planes, planeDist, 1.0);
     const cylResult = reportMatch('CYLINDRICAL_SURFACE', genGeom.cylinders, refGeom.cylinders, cylinderDist, 2.0);
-    const coneResult = reportMatch('CONICAL_SURFACE', genGeom.cones, refGeom.cones, coneDist, 5.0);
+    const coneResult = reportMatch('CONICAL_SURFACE', genUniqueCones, refUniqueCones, coneDist, 5.0);
     reportMatch('SPHERICAL_SURFACE', genGeom.spheres, refGeom.spheres,
         (a, b) => Math.abs(a.radius - b.radius) < 0.5 ? dist3(a.origin, b.origin) : Infinity, 5.0);
     reportMatch('CIRCLE (curve)', genGeom.circles, refGeom.circles,
@@ -728,7 +755,7 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
     const scoreEntries = [
         ['Planes',     planeResult.matched.length,             Math.max(genGeom.planes.length, refGeom.planes.length)],
         ['Cylinders',  cylResult.matched.length,               Math.max(genGeom.cylinders.length, refGeom.cylinders.length)],
-        ['Cones',      coneResult.matched.length,              Math.max(genGeom.cones.length, refGeom.cones.length)],
+        ['Cones',      coneResult.matched.length,              Math.max(genUniqueCones.length, refUniqueCones.length)],
         ['Faces',      faceResult.matched.length,              faceTotal],
         ['HolesExact', holeExactMatch,                         faceResult.matched.length || 1],
         ['InnerLoops', Math.min(genTotalInner, refTotalInner), Math.max(genTotalInner, refTotalInner) || 1],
@@ -769,7 +796,8 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
 
 // ─── CLI entry point ────────────────────────────────────────────────────────
 const [,, cliGenPath, cliRefPath] = process.argv;
-if (cliGenPath && cliRefPath) {
+const isCliEntry = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isCliEntry && cliGenPath && cliRefPath) {
     const genText = fs.readFileSync(cliGenPath, 'utf8');
     const refText = fs.readFileSync(cliRefPath, 'utf8');
     const { output } = compareStepFiles(genText, refText, path.basename(cliGenPath), path.basename(cliRefPath));
