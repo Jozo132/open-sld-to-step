@@ -44,6 +44,9 @@ const ftc06Path = sampleFiles.find(filePath =>
 const ftc09Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ftc_09_asme1_rd_sw1802.sldprt',
 );
+const ftc10Path = sampleFiles.find(filePath =>
+    basename(filePath).toLowerCase() === 'nist_ftc_10_asme1_rb_sw1802.sldprt',
+);
 const ftc07Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ftc_07_asme1_rd_sw1802.sldprt',
 );
@@ -1512,9 +1515,9 @@ describe('ParasolidParser', () => {
 
         const parser = new ParasolidParser(extraction.data);
         const model = parser.parse();
+        const cones = model.surfaces.filter(s => s.surfaceType === 'cone');
 
-        const hasDrillTip = model.surfaces
-            .filter(s => s.surfaceType === 'cone')
+        const hasDrillTip = cones
             .some(surface => {
                 const params = surface.params as {
                     origin: { x: number; y: number; z: number };
@@ -1531,6 +1534,7 @@ describe('ParasolidParser', () => {
             });
 
         expect(hasDrillTip).toBe(true);
+        expect(cones).toHaveLength(4);
     });
 
     it('recovers the FTC_09 micro-chamfer cones from raw cylinder origins', () => {
@@ -1562,6 +1566,53 @@ describe('ParasolidParser', () => {
             });
 
         expect(hasChamfer).toBe(true);
+    });
+
+    it('recovers the FTC_10 half-radius drill-tip cones from low-support raw cylinder sections', () => {
+        if (!ftc10Path) return;
+
+        const buf = readFileSync(ftc10Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+        const cones = model.surfaces.filter(s => s.surfaceType === 'cone');
+
+        const hasXAxisDrillTip = cones.some(surface => {
+            const params = surface.params as {
+                origin: { x: number; y: number; z: number };
+                axis: { x: number; y: number; z: number };
+                radius: number;
+                halfAngle: number;
+            };
+            return Math.abs(params.origin.x - 26.67) < 0.1 &&
+                Math.abs(params.origin.y - 15) < 0.1 &&
+                Math.abs(params.origin.z + 25) < 0.1 &&
+                Math.abs(params.axis.x - 1) < 0.01 &&
+                Math.abs(params.radius - 1.375) < 0.1 &&
+                Math.abs(params.halfAngle - 59) < 0.02;
+        });
+
+        const hasYAxisDrillTip = cones.some(surface => {
+            const params = surface.params as {
+                origin: { x: number; y: number; z: number };
+                axis: { x: number; y: number; z: number };
+                radius: number;
+                halfAngle: number;
+            };
+            return Math.abs(params.origin.x - 53.9) < 0.1 &&
+                Math.abs(params.origin.y - 14.63) < 0.1 &&
+                Math.abs(params.origin.z + 30) < 0.1 &&
+                Math.abs(params.axis.y - 1) < 0.01 &&
+                Math.abs(params.radius - 0.615) < 0.1 &&
+                Math.abs(params.halfAngle - 59) < 0.02;
+        });
+
+        expect(hasXAxisDrillTip).toBe(true);
+        expect(hasYAxisDrillTip).toBe(true);
+        expect(cones).toHaveLength(6);
     });
 });
 

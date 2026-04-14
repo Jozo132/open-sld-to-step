@@ -3211,6 +3211,12 @@ export class ParasolidParser {
     private static readonly INFERRED_ZERO_SUPPORT_DRILLTIP_GAP_MAX = 50;
     private static readonly INFERRED_ZERO_SUPPORT_DRILLTIP_RADIUS_MIN = 2.5;
     private static readonly INFERRED_ZERO_SUPPORT_DRILLTIP_RADIUS_MAX = 10.5;
+    private static readonly INFERRED_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE = 59;
+    private static readonly INFERRED_HALF_RADIUS_DRILLTIP_GAP_MIN = 8;
+    private static readonly INFERRED_HALF_RADIUS_DRILLTIP_GAP_MAX = 40;
+    private static readonly INFERRED_HALF_RADIUS_DRILLTIP_RADIUS_MIN = 1;
+    private static readonly INFERRED_HALF_RADIUS_DRILLTIP_RADIUS_MAX = 3;
+    private static readonly INFERRED_HALF_RADIUS_DRILLTIP_MAX_SUPPORT = 8;
 
     /**
      * Maximum PCA eigenvalue ratio (λ1/λ2) for a candidate plane to be
@@ -3800,6 +3806,19 @@ export class ParasolidParser {
 
         for (const cylinder of zeroSupportCylinders) {
             const axis = ParasolidParser.normalizeDirection(cylinder.params.axis);
+            const hasCompetingSectionAtOrigin = cylinders.some((other) => {
+                if (other.id === cylinder.id) return false;
+                if (Math.abs(other.params.radius - cylinder.params.radius) < ParasolidParser.CYL_RADIUS_TOL) return false;
+                const dx = cylinder.params.origin.x - other.params.origin.x;
+                const dy = cylinder.params.origin.y - other.params.origin.y;
+                const dz = cylinder.params.origin.z - other.params.origin.z;
+                return ParasolidParser.axisLineDistance(cylinder.params.origin, other.params.origin, axis) <=
+                    ParasolidParser.INFERRED_APEX_CONE_LINE_TOL &&
+                    Math.sqrt(dx * dx + dy * dy + dz * dz) <=
+                    ParasolidParser.CYL_ORIGIN_TOL;
+            });
+            if (hasCompetingSectionAtOrigin) continue;
+
             let nearestAheadGap = Infinity;
 
             for (const other of zeroSupportCylinders) {
@@ -3843,6 +3862,104 @@ export class ParasolidParser {
                     axis,
                     radius: cylinder.params.radius,
                     halfAngle: ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_OUTPUT_ANGLE,
+                },
+            });
+            nextId++;
+            seen.add(key);
+        }
+
+        return inferred;
+    }
+
+    /**
+     * Recover FTC_10-style 59-degree drill tips from low-support axis-aligned
+     * raw cylinder sections.
+     *
+     * Clean-room observation from the public NIST samples: this family uses a
+     * paired raw section whose stored cylinder radius is twice the reference
+     * cone section radius. The STEP placement is offset backward from the raw
+     * section by that half-radius projected through tan(59°).
+     */
+    private inferHalfRadiusDrillTipConesFromRawCylinderSections(
+        rawSurfaces: PsSurface[],
+        vertices: PsVertex[],
+    ): PsSurface[] {
+        const cylinders = rawSurfaces.filter((surface): surface is PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        } => surface.surfaceType === 'cylinder');
+        if (cylinders.length < 2) return [];
+
+        const assoc = this.associateVertices(cylinders, vertices);
+        const candidates = cylinders.filter((surface) => {
+            const axis = ParasolidParser.normalizeDirection(surface.params.axis);
+            const axisAlignedXY =
+                (Math.abs(Math.abs(axis.x) - 1) < 0.05 && Math.abs(axis.y) < 0.05 && Math.abs(axis.z) < 0.05) ||
+                (Math.abs(Math.abs(axis.y) - 1) < 0.05 && Math.abs(axis.x) < 0.05 && Math.abs(axis.z) < 0.05);
+            return axisAlignedXY &&
+                surface.params.radius >= ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_RADIUS_MIN &&
+                surface.params.radius <= ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_RADIUS_MAX &&
+                (assoc.get(surface.id)?.length ?? 0) <= ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_MAX_SUPPORT;
+        });
+        if (candidates.length < 2) return [];
+
+        const inferred: PsSurface[] = [];
+        const seen = new Set<string>();
+        const compareAngle = ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE * Math.PI / 180;
+        let nextId = rawSurfaces.reduce((maxId, surface) => Math.max(maxId, surface.id), 0) + 1;
+
+        for (const cylinder of candidates) {
+            const axis = ParasolidParser.normalizeDirection(cylinder.params.axis);
+            let nearestAheadGap = Infinity;
+
+            for (const other of candidates) {
+                if (other.id === cylinder.id) continue;
+                if (Math.abs(other.params.radius - cylinder.params.radius) >= ParasolidParser.CYL_RADIUS_TOL) continue;
+
+                const otherAxis = ParasolidParser.normalizeDirection(other.params.axis);
+                const dot = axis.x * otherAxis.x + axis.y * otherAxis.y + axis.z * otherAxis.z;
+                if (dot < 0.98) continue;
+                if (ParasolidParser.axisLineDistance(cylinder.params.origin, other.params.origin, axis) >
+                    ParasolidParser.INFERRED_APEX_CONE_LINE_TOL) continue;
+
+                const gap =
+                    (other.params.origin.x - cylinder.params.origin.x) * axis.x +
+                    (other.params.origin.y - cylinder.params.origin.y) * axis.y +
+                    (other.params.origin.z - cylinder.params.origin.z) * axis.z;
+                if (gap < ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_GAP_MIN ||
+                    gap > ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_GAP_MAX) continue;
+                if (gap < nearestAheadGap) nearestAheadGap = gap;
+            }
+
+            if (!isFinite(nearestAheadGap)) continue;
+
+            const coneRadius = cylinder.params.radius / 2;
+            const offset = coneRadius / Math.tan(compareAngle);
+            const coneOrigin: PsPoint = {
+                x: cylinder.params.origin.x - axis.x * offset,
+                y: cylinder.params.origin.y - axis.y * offset,
+                z: cylinder.params.origin.z - axis.z * offset,
+            };
+            const key = [
+                coneOrigin.x.toFixed(1),
+                coneOrigin.y.toFixed(1),
+                coneOrigin.z.toFixed(1),
+                axis.x.toFixed(3),
+                axis.y.toFixed(3),
+                axis.z.toFixed(3),
+                coneRadius.toFixed(2),
+                ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE.toFixed(3),
+            ].join('|');
+            if (seen.has(key)) continue;
+
+            inferred.push({
+                id: nextId,
+                surfaceType: 'cone',
+                params: {
+                    origin: coneOrigin,
+                    axis,
+                    radius: coneRadius,
+                    halfAngle: ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE,
                 },
             });
             nextId++;
@@ -4730,6 +4847,7 @@ export class ParasolidParser {
         const inferredCones = [
             ...this.inferApexConesFromCylinderPairs(mergedSurfaces, vertices),
             ...this.inferDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices),
+            ...this.inferHalfRadiusDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices),
         ];
         const surfaces = this.deduplicateSurfaces([...mergedSurfaces, ...inferredCones]);
 
