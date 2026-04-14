@@ -445,6 +445,31 @@ function conePlacementKey(cone) {
     ].join('|');
 }
 
+function formatFaceKeyNumber(value, digits) {
+    return Number.isFinite(value) ? value.toFixed(digits) : 'nan';
+}
+
+function conicalFaceKey(face) {
+    if (face.surfType !== 'CONICAL_SURFACE' || !face.surfGeom) return `keep:${face.id}`;
+    const canonical = canonicalizeCone(face.surfGeom);
+    const centroid = face.centroid ?? [NaN, NaN, NaN];
+    return [
+        ...canonical.apex.map(v => formatFaceKeyNumber(v, 3)),
+        ...canonical.axis.map(v => formatFaceKeyNumber(v, 6)),
+        formatFaceKeyNumber(face.surfGeom.semiAngle, 6),
+        formatFaceKeyNumber(face.surfGeom.radius, 3),
+        ...centroid.map(v => formatFaceKeyNumber(v, 3)),
+        formatFaceKeyNumber(face.bboxDiag ?? 0, 3),
+        String(face.innerCount ?? 0),
+        String(face.outerCount ?? 0),
+        String(face.vertexCount ?? 0),
+    ].join('|');
+}
+
+function deduplicateConicalFaces(faces) {
+    return deduplicateByKey(faces, conicalFaceKey);
+}
+
 function faceDist(a, b) {
     if (a.surfType !== b.surfType) return Infinity;
     const holePenalty = Math.abs(a.innerCount - b.innerCount) * 10;
@@ -718,19 +743,24 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
     let refFaces = extractFaces(refEntities, refAngleScale);
     if (genScale !== 1.0) genFaces = scaleFaces(genFaces, genScale);
     if (refScale !== 1.0) refFaces = scaleFaces(refFaces, refScale);
-    const faceResult = greedyMatch(genFaces, refFaces, faceDist, 200);
-    const faceTotal = Math.max(genFaces.length, refFaces.length);
+    const genUniqueFaces = deduplicateConicalFaces(genFaces);
+    const refUniqueFaces = deduplicateConicalFaces(refFaces);
+    if (genUniqueFaces.length !== genFaces.length || refUniqueFaces.length !== refFaces.length) {
+        log(`  Conical face matching canonicalizes equivalent faces: generated=${genFaces.length}→${genUniqueFaces.length}  reference=${refFaces.length}→${refUniqueFaces.length}`);
+    }
+    const faceResult = greedyMatch(genUniqueFaces, refUniqueFaces, faceDist, 200);
+    const faceTotal = Math.max(genUniqueFaces.length, refUniqueFaces.length);
     const faceMatchPct = faceTotal > 0 ? (faceResult.matched.length / faceTotal * 100).toFixed(1) : '100.0';
     const avgFaceDist = faceResult.matched.length > 0
         ? (faceResult.matched.reduce((s, m) => s + m.dist, 0) / faceResult.matched.length).toFixed(1) : 'N/A';
 
-    log(`  Generated: ${genFaces.length}  |  Reference: ${refFaces.length}`);
+    log(`  Generated: ${genUniqueFaces.length}  |  Reference: ${refUniqueFaces.length}`);
     log(`  Matched:   ${faceResult.matched.length} / ${faceTotal}  (${faceMatchPct}%)    avg dist: ${avgFaceDist}`);
     log(`  Unmatched generated: ${faceResult.unmatchedGen.length}    Unmatched reference: ${faceResult.unmatchedRef.length}`);
 
     const matchBySurfType = {};
     for (const m of faceResult.matched) { const t = m.ref.surfType; if (!matchBySurfType[t]) matchBySurfType[t] = { matched: 0, total: 0 }; matchBySurfType[t].matched++; }
-    for (const f of refFaces) { const t = f.surfType; if (!matchBySurfType[t]) matchBySurfType[t] = { matched: 0, total: 0 }; matchBySurfType[t].total++; }
+    for (const f of refUniqueFaces) { const t = f.surfType; if (!matchBySurfType[t]) matchBySurfType[t] = { matched: 0, total: 0 }; matchBySurfType[t].total++; }
     log(`\n  Face match by surface type:`);
     log(`  ${'Surface Type'.padEnd(30)} ${'Matched'.padStart(8)} ${'Ref Total'.padStart(10)} ${'%'.padStart(6)}`);
     for (const [t, v] of Object.entries(matchBySurfType).sort((a, b) => b[1].total - a[1].total)) {
@@ -738,8 +768,8 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
         log(`  ${t.padEnd(30)} ${String(v.matched).padStart(8)} ${String(v.total).padStart(10)} ${(pct + '%').padStart(6)}`);
     }
 
-    const genTotalInner = genFaces.reduce((s, f) => s + f.innerCount, 0);
-    const refTotalInner = refFaces.reduce((s, f) => s + f.innerCount, 0);
+    const genTotalInner = genUniqueFaces.reduce((s, f) => s + f.innerCount, 0);
+    const refTotalInner = refUniqueFaces.reduce((s, f) => s + f.innerCount, 0);
     log(`\n  Inner loops (holes):  generated=${genTotalInner}  reference=${refTotalInner}`);
 
     let holeExactMatch = 0, holeDiffMatch = 0;

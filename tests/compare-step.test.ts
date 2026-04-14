@@ -48,6 +48,85 @@ function buildStep(
     return lines.join('\n');
 }
 
+function buildConicalFaceStep(
+    faces: Array<{
+        origin: [number, number, number];
+        radius: number;
+        angle: number;
+        vertices: Array<[number, number, number]>;
+    }>,
+): string {
+    const lines = [
+        'ISO-10303-21;',
+        'HEADER;',
+        'ENDSEC;',
+        'DATA;',
+    ];
+
+    let nextId = 1;
+    for (const face of faces) {
+        const pointIds = face.vertices.map((vertex) => {
+            const pointId = nextId++;
+            lines.push(`#${pointId}=CARTESIAN_POINT('',(${vertex[0]},${vertex[1]},${vertex[2]}));`);
+            return pointId;
+        });
+
+        const vertexIds = pointIds.map((pointId) => {
+            const vertexId = nextId++;
+            lines.push(`#${vertexId}=VERTEX_POINT('',#${pointId});`);
+            return vertexId;
+        });
+
+        const edgeCurveIds = [];
+        const orientedEdgeIds = [];
+        for (let index = 0; index < face.vertices.length; index++) {
+            const start = face.vertices[index];
+            const end = face.vertices[(index + 1) % face.vertices.length];
+            const dx = end[0] - start[0];
+            const dy = end[1] - start[1];
+            const dz = end[2] - start[2];
+            const length = Math.hypot(dx, dy, dz) || 1;
+
+            const directionId = nextId++;
+            const vectorId = nextId++;
+            const lineId = nextId++;
+            const edgeCurveId = nextId++;
+            const orientedEdgeId = nextId++;
+
+            lines.push(`#${directionId}=DIRECTION('',(${dx / length},${dy / length},${dz / length}));`);
+            lines.push(`#${vectorId}=VECTOR('',#${directionId},${length});`);
+            lines.push(`#${lineId}=LINE('',#${pointIds[index]},#${vectorId});`);
+            lines.push(`#${edgeCurveId}=EDGE_CURVE('',#${vertexIds[index]},#${vertexIds[(index + 1) % vertexIds.length]},#${lineId},.T.);`);
+            lines.push(`#${orientedEdgeId}=ORIENTED_EDGE('',*,*,#${edgeCurveId},.T.);`);
+
+            edgeCurveIds.push(edgeCurveId);
+            orientedEdgeIds.push(orientedEdgeId);
+        }
+
+        const loopId = nextId++;
+        const boundId = nextId++;
+        const axisId = nextId++;
+        const refId = nextId++;
+        const placePointId = nextId++;
+        const placeId = nextId++;
+        const coneId = nextId++;
+        const faceId = nextId++;
+
+        lines.push(`#${loopId}=EDGE_LOOP('',(${orientedEdgeIds.map((id) => `#${id}`).join(',')}));`);
+        lines.push(`#${boundId}=FACE_OUTER_BOUND('',#${loopId},.T.);`);
+        lines.push(`#${axisId}=DIRECTION('',(0.,1.,0.));`);
+        lines.push(`#${refId}=DIRECTION('',(1.,0.,0.));`);
+        lines.push(`#${placePointId}=CARTESIAN_POINT('',(${face.origin[0]},${face.origin[1]},${face.origin[2]}));`);
+        lines.push(`#${placeId}=AXIS2_PLACEMENT_3D('',#${placePointId},#${axisId},#${refId});`);
+        lines.push(`#${coneId}=CONICAL_SURFACE('',#${placeId},${face.radius},${face.angle});`);
+        lines.push(`#${faceId}=ADVANCED_FACE('',(#${boundId}),#${coneId},.T.);`);
+    }
+
+    lines.push('ENDSEC;');
+    lines.push('END-ISO-10303-21;');
+    return lines.join('\n');
+}
+
 describe('compareStepFiles', () => {
     it('deduplicates identical cone placements before cone scoring', () => {
         const generated = buildStep([
@@ -104,5 +183,89 @@ describe('compareStepFiles', () => {
         const { scores } = compareStepFiles(generated, reference, 'generated.stp', 'reference.stp');
 
         expect(scores.Cones).toEqual({ matched: 1, total: 1, pct: 100 });
+    });
+
+    it('deduplicates exact duplicate conical faces before face scoring', () => {
+        const generated = buildConicalFaceStep([
+            {
+                origin: [0, 0, 0],
+                radius: 5,
+                angle: Math.PI / 4,
+                vertices: [
+                    [0, 0, 0],
+                    [5, 5, 0],
+                    [0, 5, 5],
+                ],
+            },
+        ]);
+        const reference = buildConicalFaceStep([
+            {
+                origin: [0, 0, 0],
+                radius: 5,
+                angle: Math.PI / 4,
+                vertices: [
+                    [0, 0, 0],
+                    [5, 5, 0],
+                    [0, 5, 5],
+                ],
+            },
+            {
+                origin: [0, 0, 0],
+                radius: 5,
+                angle: Math.PI / 4,
+                vertices: [
+                    [0, 0, 0],
+                    [5, 5, 0],
+                    [0, 5, 5],
+                ],
+            },
+        ]);
+
+        const { scores, output } = compareStepFiles(generated, reference, 'generated.stp', 'reference.stp');
+
+        expect(scores.Faces).toEqual({ matched: 1, total: 1, pct: 100 });
+        expect(output).toContain('Conical face matching canonicalizes equivalent faces: generated=1→1  reference=2→1');
+    });
+
+    it('keeps distinct conical faces on the same cone separate', () => {
+        const generated = buildConicalFaceStep([
+            {
+                origin: [0, 0, 0],
+                radius: 5,
+                angle: Math.PI / 4,
+                vertices: [
+                    [0, 0, 0],
+                    [5, 5, 0],
+                    [0, 5, 5],
+                ],
+            },
+        ]);
+        const reference = buildConicalFaceStep([
+            {
+                origin: [0, 0, 0],
+                radius: 5,
+                angle: Math.PI / 4,
+                vertices: [
+                    [0, 0, 0],
+                    [5, 5, 0],
+                    [0, 5, 5],
+                ],
+            },
+            {
+                origin: [0, 0, 0],
+                radius: 5,
+                angle: Math.PI / 4,
+                vertices: [
+                    [10, 0, 0],
+                    [15, 5, 0],
+                    [10, 5, 5],
+                ],
+            },
+        ]);
+
+        const { scores, output } = compareStepFiles(generated, reference, 'generated.stp', 'reference.stp');
+
+        expect(scores.Faces).toEqual({ matched: 1, total: 2, pct: 50 });
+        expect(output).not.toContain('Conical face matching canonicalizes equivalent faces: generated=1→1  reference=2→1');
     });
 });
