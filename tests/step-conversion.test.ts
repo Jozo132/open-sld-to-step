@@ -1610,9 +1610,41 @@ describe('ParasolidParser', () => {
                 Math.abs(params.halfAngle - 59) < 0.02;
         });
 
+        const hasCompletedYAxisPair = cones.some(surface => {
+            const params = surface.params as {
+                origin: { x: number; y: number; z: number };
+                axis: { x: number; y: number; z: number };
+                radius: number;
+                halfAngle: number;
+            };
+            return Math.abs(params.origin.x - 31.9) < 0.1 &&
+                Math.abs(params.origin.y - 14.63) < 0.1 &&
+                Math.abs(params.origin.z + 30) < 0.1 &&
+                Math.abs(params.axis.y - 1) < 0.01 &&
+                Math.abs(params.radius - 0.615) < 0.1 &&
+                Math.abs(params.halfAngle - 59) < 0.02;
+        });
+
+        const hasCompletedUpperPair = cones.some(surface => {
+            const params = surface.params as {
+                origin: { x: number; y: number; z: number };
+                axis: { x: number; y: number; z: number };
+                radius: number;
+                halfAngle: number;
+            };
+            return Math.abs(params.origin.x - 35.1) < 0.1 &&
+                Math.abs(params.origin.y - 14.63) < 0.1 &&
+                Math.abs(params.origin.z + 20) < 0.1 &&
+                Math.abs(params.axis.y - 1) < 0.01 &&
+                Math.abs(params.radius - 0.615) < 0.1 &&
+                Math.abs(params.halfAngle - 59) < 0.02;
+        });
+
         expect(hasXAxisDrillTip).toBe(true);
         expect(hasYAxisDrillTip).toBe(true);
-        expect(cones).toHaveLength(6);
+        expect(hasCompletedYAxisPair).toBe(true);
+        expect(hasCompletedUpperPair).toBe(true);
+        expect(cones).toHaveLength(8);
     });
 });
 

@@ -3217,6 +3217,13 @@ export class ParasolidParser {
     private static readonly INFERRED_HALF_RADIUS_DRILLTIP_RADIUS_MIN = 1;
     private static readonly INFERRED_HALF_RADIUS_DRILLTIP_RADIUS_MAX = 3;
     private static readonly INFERRED_HALF_RADIUS_DRILLTIP_MAX_SUPPORT = 8;
+    private static readonly INFERRED_CENTER_DRILLTIP_RADIUS_MIN = 1.6;
+    private static readonly INFERRED_CENTER_DRILLTIP_RADIUS_MAX = 1.9;
+    private static readonly INFERRED_CENTER_DRILLTIP_CONE_RADIUS_MIN = 0.5;
+    private static readonly INFERRED_CENTER_DRILLTIP_CONE_RADIUS_MAX = 0.8;
+    private static readonly INFERRED_CENTER_DRILLTIP_RELATED_DISTANCE_MAX = 6;
+    private static readonly INFERRED_CENTER_DRILLTIP_Y_DELTA_MIN = -14;
+    private static readonly INFERRED_CENTER_DRILLTIP_Y_DELTA_MAX = -10;
 
     /**
      * Maximum PCA eigenvalue ratio (λ1/λ2) for a candidate plane to be
@@ -3964,6 +3971,181 @@ export class ParasolidParser {
             });
             nextId++;
             seen.add(key);
+        }
+
+        return inferred;
+    }
+
+    /**
+     * Complete repeated FTC_10-style center-cylinder drill-tip patterns when
+     * equivalent raw center cylinders exist but one center is missing the two
+     * symmetric child cones already observed around its siblings.
+     */
+    private inferRepeatedCenterCylinderDrillTipCones(
+        rawSurfaces: PsSurface[],
+        vertices: PsVertex[],
+        existingCones: PsSurface[],
+    ): PsSurface[] {
+        const cylinders = rawSurfaces.filter((surface): surface is PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        } => surface.surfaceType === 'cylinder');
+        if (cylinders.length === 0 || existingCones.length === 0) return [];
+
+        const assoc = this.associateVertices(cylinders, vertices);
+        const centerCandidates = cylinders.filter((surface) => {
+            const axis = ParasolidParser.normalizeDirection(surface.params.axis);
+            return Math.abs(Math.abs(axis.y) - 1) < 0.05 &&
+                Math.abs(axis.x) < 0.05 &&
+                Math.abs(axis.z) < 0.05 &&
+                surface.params.radius >= ParasolidParser.INFERRED_CENTER_DRILLTIP_RADIUS_MIN &&
+                surface.params.radius <= ParasolidParser.INFERRED_CENTER_DRILLTIP_RADIUS_MAX &&
+                (assoc.get(surface.id)?.length ?? 0) <= ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_MAX_SUPPORT;
+        });
+        if (centerCandidates.length < 3) return [];
+
+        const relatedConeCandidates = existingCones.filter((surface): surface is PsSurface & {
+            surfaceType: 'cone';
+            params: { origin: PsPoint; axis: PsPoint; radius: number; halfAngle: number };
+        } => {
+            if (surface.surfaceType !== 'cone') return false;
+            const params = surface.params as {
+                origin: PsPoint;
+                axis: PsPoint;
+                radius: number;
+                halfAngle: number;
+            };
+            const axis = ParasolidParser.normalizeDirection(params.axis);
+            return Math.abs(axis.y - 1) < 0.05 &&
+                Math.abs(axis.x) < 0.05 &&
+                Math.abs(axis.z) < 0.05 &&
+                Math.abs(params.halfAngle - ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE) < 0.05 &&
+                params.radius >= ParasolidParser.INFERRED_CENTER_DRILLTIP_CONE_RADIUS_MIN &&
+                params.radius <= ParasolidParser.INFERRED_CENTER_DRILLTIP_CONE_RADIUS_MAX;
+        });
+        if (relatedConeCandidates.length < 4) return [];
+
+        const centersWithRelated = centerCandidates.map((center) => {
+            const related = relatedConeCandidates
+                .map((cone) => ({
+                    cone,
+                    dx: cone.params.origin.x - center.params.origin.x,
+                    dy: cone.params.origin.y - center.params.origin.y,
+                    dz: cone.params.origin.z - center.params.origin.z,
+                }))
+                .filter((item) => {
+                    return Math.hypot(item.dx, item.dz) <= ParasolidParser.INFERRED_CENTER_DRILLTIP_RELATED_DISTANCE_MAX &&
+                        item.dy >= ParasolidParser.INFERRED_CENTER_DRILLTIP_Y_DELTA_MIN &&
+                        item.dy <= ParasolidParser.INFERRED_CENTER_DRILLTIP_Y_DELTA_MAX;
+                });
+            return { center, related };
+        });
+
+        const inferred: PsSurface[] = [];
+        const existingKeys = new Set(relatedConeCandidates.map((cone) => [
+            cone.params.origin.x.toFixed(1),
+            cone.params.origin.y.toFixed(1),
+            cone.params.origin.z.toFixed(1),
+            cone.params.axis.x.toFixed(3),
+            cone.params.axis.y.toFixed(3),
+            cone.params.axis.z.toFixed(3),
+            cone.params.radius.toFixed(2),
+            ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE.toFixed(3),
+        ].join('|')));
+        let nextId = [...rawSurfaces, ...existingCones].reduce((maxId, surface) => Math.max(maxId, surface.id), 0) + 1;
+
+        const centersByRow = new Map<string, typeof centersWithRelated>();
+        for (const item of centersWithRelated) {
+            const axis = ParasolidParser.normalizeDirection(item.center.params.axis);
+            const rowKey = [
+                item.center.params.origin.y.toFixed(1),
+                item.center.params.origin.z.toFixed(1),
+                axis.x.toFixed(3),
+                axis.y.toFixed(3),
+                axis.z.toFixed(3),
+                item.center.params.radius.toFixed(2),
+            ].join('|');
+            const bucket = centersByRow.get(rowKey) ?? [];
+            bucket.push(item);
+            centersByRow.set(rowKey, bucket);
+        }
+
+        for (const row of centersByRow.values()) {
+            const populatedCenters = row.filter((item) => item.related.length >= 2);
+            const emptyCenters = row.filter((item) => item.related.length === 0);
+            if (populatedCenters.length < 2 || emptyCenters.length === 0) continue;
+
+            const offsetStats = new Map<string, { dx: number; dy: number; dz: number; radius: number; count: number }>();
+            for (const item of populatedCenters) {
+                for (const related of item.related) {
+                    const key = [
+                        related.dx.toFixed(1),
+                        related.dy.toFixed(2),
+                        related.dz.toFixed(1),
+                    ].join('|');
+                    const stat = offsetStats.get(key);
+                    if (stat) {
+                        stat.dx += related.dx;
+                        stat.dy += related.dy;
+                        stat.dz += related.dz;
+                        stat.radius += related.cone.params.radius;
+                        stat.count++;
+                    } else {
+                        offsetStats.set(key, {
+                            dx: related.dx,
+                            dy: related.dy,
+                            dz: related.dz,
+                            radius: related.cone.params.radius,
+                            count: 1,
+                        });
+                    }
+                }
+            }
+
+            const repeatedOffsets = [...offsetStats.values()]
+                .filter((stat) => stat.count >= 2)
+                .map((stat) => ({
+                    dx: stat.dx / stat.count,
+                    dy: stat.dy / stat.count,
+                    dz: stat.dz / stat.count,
+                    radius: stat.radius / stat.count,
+                }));
+            if (repeatedOffsets.length < 2) continue;
+
+            for (const item of emptyCenters) {
+                const axis = ParasolidParser.normalizeDirection(item.center.params.axis);
+                for (const offset of repeatedOffsets) {
+                    const origin: PsPoint = {
+                        x: item.center.params.origin.x + offset.dx,
+                        y: item.center.params.origin.y + offset.dy,
+                        z: item.center.params.origin.z + offset.dz,
+                    };
+                    const key = [
+                        origin.x.toFixed(1),
+                        origin.y.toFixed(1),
+                        origin.z.toFixed(1),
+                        axis.x.toFixed(3),
+                        axis.y.toFixed(3),
+                        axis.z.toFixed(3),
+                        offset.radius.toFixed(2),
+                        ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE.toFixed(3),
+                    ].join('|');
+                    if (existingKeys.has(key)) continue;
+
+                    inferred.push({
+                        id: nextId,
+                        surfaceType: 'cone',
+                        params: {
+                            origin,
+                            axis,
+                            radius: offset.radius,
+                            halfAngle: ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE,
+                        },
+                    });
+                    existingKeys.add(key);
+                    nextId++;
+                }
+            }
         }
 
         return inferred;
@@ -4844,10 +5026,19 @@ export class ParasolidParser {
         );
         // Apply narrow cone recovery after the washer pass so it sees the same
         // consolidated cylinder inventory as the bounded-topology builder.
+        const apexCones = this.inferApexConesFromCylinderPairs(mergedSurfaces, vertices);
+        const directDrillTipCones = this.inferDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices);
+        const halfRadiusDrillTipCones = this.inferHalfRadiusDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices);
+        const repeatedCenterDrillTipCones = this.inferRepeatedCenterCylinderDrillTipCones(
+            validatedSurfaces,
+            vertices,
+            halfRadiusDrillTipCones,
+        );
         const inferredCones = [
-            ...this.inferApexConesFromCylinderPairs(mergedSurfaces, vertices),
-            ...this.inferDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices),
-            ...this.inferHalfRadiusDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices),
+            ...apexCones,
+            ...directDrillTipCones,
+            ...halfRadiusDrillTipCones,
+            ...repeatedCenterDrillTipCones,
         ];
         const surfaces = this.deduplicateSurfaces([...mergedSurfaces, ...inferredCones]);
 
