@@ -3177,6 +3177,7 @@ export class ParasolidParser {
     private static readonly CYL_AXIS_TOL = 0.001;  // radians
     private static readonly CYL_ORIGIN_TOL = 0.5;   // mm — axis line distance
     private static readonly CYL_RADIUS_TOL = 0.01;  // mm
+    private static readonly CONE_SECTION_RADIUS_TOL = 0.1; // mm — coaxial section match
     private static readonly VERTEX_CYL_TOL = 0.5;   // mm — vertex on cylinder
     private static readonly VERTEX_TORUS_TOL = 0.5; // mm — vertex on torus tube
     // Cone recovery from coaxial cylinder section transitions.
@@ -3573,6 +3574,74 @@ export class ParasolidParser {
         }
         if (!isFinite(min) || !isFinite(max)) return null;
         return { min, max };
+    }
+
+    /**
+     * Infer bounded cone section heights from neighboring coaxial cylinders
+     * when the cone itself has too little direct vertex support.
+     */
+    private findConeSectionBounds(
+        surface: PsSurface,
+        surfaces: PsSurface[],
+    ): { hMin: number; hMax: number; botRadius: number; topRadius: number } | null {
+        if (surface.surfaceType !== 'cone') return null;
+
+        const params = surface.params as Record<string, unknown>;
+        const origin = params.origin as PsPoint;
+        const axis = ParasolidParser.normalizeDirection(params.axis as PsPoint);
+        const radius = params.radius as number;
+        const halfAngle = ParasolidParser.coneHalfAngleRadians((params.halfAngle as number) ?? 0);
+        const tanHA = Math.tan(halfAngle);
+        if (!isFinite(tanHA) || Math.abs(tanHA) < 1e-6) return null;
+
+        const sectionMatches = surfaces
+            .filter((candidate): candidate is PsSurface & {
+                surfaceType: 'cylinder';
+                params: { origin: PsPoint; axis: PsPoint; radius: number };
+            } => candidate.surfaceType === 'cylinder')
+            .map((candidate) => {
+                const cylAxis = ParasolidParser.normalizeDirection(candidate.params.axis);
+                const dot = axis.x * cylAxis.x + axis.y * cylAxis.y + axis.z * cylAxis.z;
+                if (Math.abs(Math.abs(dot) - 1) > 0.02) return null;
+                if (ParasolidParser.axisLineDistance(origin, candidate.params.origin, axis) > ParasolidParser.CYL_ORIGIN_TOL) {
+                    return null;
+                }
+
+                const dx = candidate.params.origin.x - origin.x;
+                const dy = candidate.params.origin.y - origin.y;
+                const dz = candidate.params.origin.z - origin.z;
+                const h = dx * axis.x + dy * axis.y + dz * axis.z;
+                const expectedRadius = radius + h * tanHA;
+                if (expectedRadius < 0) return null;
+                if (Math.abs(candidate.params.radius - expectedRadius) > ParasolidParser.CONE_SECTION_RADIUS_TOL) {
+                    return null;
+                }
+
+                return { h, radius: candidate.params.radius };
+            })
+            .filter((candidate): candidate is { h: number; radius: number } => candidate !== null)
+            .sort((left, right) => left.h - right.h);
+
+        const uniqueMatches: Array<{ h: number; radius: number }> = [];
+        for (const match of sectionMatches) {
+            const duplicate = uniqueMatches.some((existing) => {
+                return Math.abs(existing.h - match.h) < 0.01 &&
+                    Math.abs(existing.radius - match.radius) < ParasolidParser.CYL_RADIUS_TOL;
+            });
+            if (!duplicate) uniqueMatches.push(match);
+        }
+
+        if (uniqueMatches.length < 2) return null;
+        const bottom = uniqueMatches[0];
+        const top = uniqueMatches[uniqueMatches.length - 1];
+        if (Math.abs(top.h - bottom.h) < 0.01) return null;
+
+        return {
+            hMin: bottom.h,
+            hMax: top.h,
+            botRadius: bottom.radius,
+            topRadius: top.radius,
+        };
     }
 
     /** Normalize stored cone angles so trig always uses radians. */
@@ -4802,8 +4871,6 @@ export class ParasolidParser {
             if (surf.surfaceType !== 'cone') continue;
 
             const assocIndices = vertexSurfaceMap.get(surf.id) ?? [];
-            if (assocIndices.length < 2) continue;
-
             const p = surf.params as Record<string, unknown>;
             const origin = p.origin as PsPoint;
             const axis = p.axis as PsPoint;
@@ -4812,16 +4879,40 @@ export class ParasolidParser {
             const tanHA = Math.tan(halfAngle);
             const { uAxis, vAxis } = ParasolidParser.planeBasis(axis);
 
-            // Project vertices along axis to find height extent
-            const heights: number[] = [];
-            for (const i of assocIndices) {
-                const v = vertices[i].position;
-                const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
-                heights.push(dx * axis.x + dy * axis.y + dz * axis.z);
+            let hMin: number | null = null;
+            let hMax: number | null = null;
+            let botRadius: number | null = null;
+            let topRadius: number | null = null;
+            let useVertexBoundary = false;
+
+            if (assocIndices.length >= 2) {
+                const heights: number[] = [];
+                for (const i of assocIndices) {
+                    const v = vertices[i].position;
+                    const dx = v.x - origin.x, dy = v.y - origin.y, dz = v.z - origin.z;
+                    heights.push(dx * axis.x + dy * axis.y + dz * axis.z);
+                }
+                const localMin = Math.min(...heights);
+                const localMax = Math.max(...heights);
+                if (Math.abs(localMax - localMin) >= 0.01) {
+                    hMin = localMin;
+                    hMax = localMax;
+                    botRadius = Math.max(0, radius + localMin * tanHA);
+                    topRadius = Math.max(0, radius + localMax * tanHA);
+                    useVertexBoundary = true;
+                }
             }
-            const hMin = Math.min(...heights);
-            const hMax = Math.max(...heights);
-            if (Math.abs(hMax - hMin) < 0.01) continue;
+
+            if (hMin === null || hMax === null || botRadius === null || topRadius === null) {
+                const sectionBounds = this.findConeSectionBounds(surf, surfaces);
+                if (sectionBounds) {
+                    hMin = sectionBounds.hMin;
+                    hMax = sectionBounds.hMax;
+                    botRadius = sectionBounds.botRadius;
+                    topRadius = sectionBounds.topRadius;
+                }
+            }
+            if (hMin === null || hMax === null || botRadius === null || topRadius === null) continue;
 
             const bottomCenter: PsPoint = {
                 x: origin.x + hMin * axis.x,
@@ -4833,11 +4924,11 @@ export class ParasolidParser {
                 y: origin.y + hMax * axis.y,
                 z: origin.z + hMax * axis.z,
             };
-            const botRadius = Math.max(0, radius + hMin * tanHA);
-            const topRadius = Math.max(0, radius + hMax * tanHA);
 
             // Use actual vertices sorted by angle for accurate centroid
-            const conePts = this.buildAngularBoundaryPoints(origin, axis, assocIndices, vertices);
+            const conePts = useVertexBoundary
+                ? this.buildAngularBoundaryPoints(origin, axis, assocIndices, vertices)
+                : [];
             const coneTarget = boundaryBudgetTargets.get(
                 ParasolidParser.buildBoundaryBudgetKey('cone', surf.id),
             );

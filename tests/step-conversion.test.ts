@@ -1568,6 +1568,28 @@ describe('ParasolidParser', () => {
         expect(hasChamfer).toBe(true);
     });
 
+    it('builds FTC_09 cone faces from coaxial cylinder sections when cone vertices are absent', () => {
+        if (!ftc09Path) return;
+
+        const buf = readFileSync(ftc09Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const coneSurfaceIds = new Set(
+            model.surfaces
+                .filter(surface => surface.surfaceType === 'cone')
+                .map(surface => surface.id),
+        );
+        const coneFaces = model.faces.filter(face => coneSurfaceIds.has(face.surface));
+
+        expect(coneSurfaceIds.size).toBe(4);
+        expect(coneFaces).toHaveLength(coneSurfaceIds.size);
+    });
+
     it('recovers the FTC_10 half-radius drill-tip cones from low-support raw cylinder sections', () => {
         if (!ftc10Path) return;
 
