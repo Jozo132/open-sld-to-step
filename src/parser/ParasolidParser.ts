@@ -3644,6 +3644,60 @@ export class ParasolidParser {
         };
     }
 
+    /**
+     * Infer a bounded apex section for inferred 59-degree drill-tip cones that
+     * are only backed by a same-radius coaxial cylinder section ahead of the tip.
+     */
+    private findDrillTipConeBounds(
+        surface: PsSurface,
+        surfaces: PsSurface[],
+    ): { hMin: number; hMax: number; botRadius: number; topRadius: number } | null {
+        if (surface.surfaceType !== 'cone') return null;
+
+        const params = surface.params as Record<string, unknown>;
+        const origin = params.origin as PsPoint;
+        const axis = ParasolidParser.normalizeDirection(params.axis as PsPoint);
+        const radius = params.radius as number;
+        const halfAngle = ParasolidParser.coneHalfAngleRadians((params.halfAngle as number) ?? 0);
+        const targetAngle = ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_OUTPUT_ANGLE * Math.PI / 180;
+        if (Math.abs(halfAngle - targetAngle) > 0.05) return null;
+
+        const tanHA = Math.tan(halfAngle);
+        if (!isFinite(tanHA) || Math.abs(tanHA) < 1e-6 || radius <= 0) return null;
+
+        const hasSameRadiusCylinderAhead = surfaces.some((candidate) => {
+            if (candidate.surfaceType !== 'cylinder') return false;
+
+            const cylinder = candidate as PsSurface & {
+                surfaceType: 'cylinder';
+                params: { origin: PsPoint; axis: PsPoint; radius: number };
+            };
+
+            if (Math.abs(cylinder.params.radius - radius) >= ParasolidParser.CYL_RADIUS_TOL) return false;
+
+            const cylAxis = ParasolidParser.normalizeDirection(cylinder.params.axis);
+            const dot = axis.x * cylAxis.x + axis.y * cylAxis.y + axis.z * cylAxis.z;
+            if (dot < 0.98) return false;
+            if (ParasolidParser.axisLineDistance(origin, cylinder.params.origin, axis) >
+                ParasolidParser.INFERRED_APEX_CONE_LINE_TOL) return false;
+
+            const dx = cylinder.params.origin.x - origin.x;
+            const dy = cylinder.params.origin.y - origin.y;
+            const dz = cylinder.params.origin.z - origin.z;
+            const gap = dx * axis.x + dy * axis.y + dz * axis.z;
+            return gap >= ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_GAP_MIN &&
+                gap <= ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_GAP_MAX;
+        });
+        if (!hasSameRadiusCylinderAhead) return null;
+
+        return {
+            hMin: -radius / tanHA,
+            hMax: 0,
+            botRadius: 0,
+            topRadius: radius,
+        };
+    }
+
     /** Normalize stored cone angles so trig always uses radians. */
     private static coneHalfAngleRadians(halfAngle: number): number {
         if (!isFinite(halfAngle)) return 0;
@@ -4910,6 +4964,15 @@ export class ParasolidParser {
                     hMax = sectionBounds.hMax;
                     botRadius = sectionBounds.botRadius;
                     topRadius = sectionBounds.topRadius;
+                }
+            }
+            if (hMin === null || hMax === null || botRadius === null || topRadius === null) {
+                const drillTipBounds = this.findDrillTipConeBounds(surf, surfaces);
+                if (drillTipBounds) {
+                    hMin = drillTipBounds.hMin;
+                    hMax = drillTipBounds.hMax;
+                    botRadius = drillTipBounds.botRadius;
+                    topRadius = drillTipBounds.topRadius;
                 }
             }
             if (hMin === null || hMax === null || botRadius === null || topRadius === null) continue;

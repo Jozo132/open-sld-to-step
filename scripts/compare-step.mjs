@@ -380,11 +380,39 @@ function cylinderDist(a, b) {
     return Math.sqrt(Math.max(0, perpSq)) + Math.abs(a.radius - b.radius);
 }
 
+function canonicalizeAxis(axis) {
+    const normalized = [...axis];
+    for (const component of normalized) {
+        if (Math.abs(component) < 1e-9) continue;
+        if (component < 0) return normalized.map(v => -v);
+        break;
+    }
+    return normalized;
+}
+
+function canonicalizeCone(cone) {
+    const axis = canonicalizeAxis(cone.axis);
+    const tanSemiAngle = Math.tan(cone.semiAngle);
+    const offset = !isFinite(tanSemiAngle) || Math.abs(tanSemiAngle) < 1e-9
+        ? 0
+        : cone.radius / tanSemiAngle;
+    return {
+        axis,
+        semiAngle: cone.semiAngle,
+        apex: [
+            cone.origin[0] - axis[0] * offset,
+            cone.origin[1] - axis[1] * offset,
+            cone.origin[2] - axis[2] * offset,
+        ],
+    };
+}
+
 function coneDist(a, b) {
-    if (!dirMatch(a.axis, b.axis, 0.02)) return Infinity;
-    if (Math.abs(a.radius - b.radius) > 0.5) return Infinity;
-    if (Math.abs(a.semiAngle - b.semiAngle) > 0.05) return Infinity;
-    return dist3(a.origin, b.origin);
+    const canonicalA = canonicalizeCone(a);
+    const canonicalB = canonicalizeCone(b);
+    if (!dirMatch(canonicalA.axis, canonicalB.axis, 0.02)) return Infinity;
+    if (Math.abs(canonicalA.semiAngle - canonicalB.semiAngle) > 0.05) return Infinity;
+    return dist3(canonicalA.apex, canonicalB.apex);
 }
 
 function deduplicateByKey(items, keyFn) {
@@ -400,11 +428,11 @@ function deduplicateByKey(items, keyFn) {
 }
 
 function conePlacementKey(cone) {
+    const canonical = canonicalizeCone(cone);
     return [
-        ...cone.origin.map(v => v.toFixed(4)),
-        ...cone.axis.map(v => v.toFixed(6)),
-        cone.radius.toFixed(4),
-        cone.semiAngle.toFixed(6),
+        ...canonical.apex.map(v => v.toFixed(4)),
+        ...canonical.axis.map(v => v.toFixed(6)),
+        canonical.semiAngle.toFixed(6),
     ].join('|');
 }
 
@@ -427,6 +455,9 @@ function faceDist(a, b) {
             if (Math.abs(Math.abs(dot) - 1.0) > 0.05) return Infinity;
             if (Math.abs(a.surfGeom.radius - b.surfGeom.radius) > 0.5) return Infinity;
             geomDist = Math.abs(a.surfGeom.radius - b.surfGeom.radius);
+        } else if (a.surfGeom.surfType === 'CONICAL_SURFACE' && b.surfGeom.surfType === 'CONICAL_SURFACE') {
+            geomDist = coneDist(a.surfGeom, b.surfGeom);
+            if (!isFinite(geomDist) || geomDist > 2.0) return Infinity;
         }
     }
     return centroidDist + holePenalty + geomDist;
@@ -442,7 +473,10 @@ function countByType(entities) {
 
 function describeGeom(g) {
     if (g.normal && g.d !== undefined) return `n=(${fmtV(g.normal)}) d=${g.d.toFixed(1)} origin=(${fmtV(g.origin)})`;
-    if (g.axis && g.radius !== undefined && g.semiAngle !== undefined) return `axis=(${fmtV(g.axis)}) r=${g.radius.toFixed(2)} semiAngle=${g.semiAngle.toFixed(3)} origin=(${fmtV(g.origin)})`;
+    if (g.axis && g.radius !== undefined && g.semiAngle !== undefined) {
+        const canonical = canonicalizeCone(g);
+        return `axis=(${fmtV(canonical.axis)}) semiAngle=${g.semiAngle.toFixed(3)} apex=(${fmtV(canonical.apex)}) origin=(${fmtV(g.origin)}) r=${g.radius.toFixed(2)}`;
+    }
     if (g.axis && g.radius !== undefined) return `axis=(${fmtV(g.axis)}) r=${g.radius.toFixed(2)} origin=(${fmtV(g.origin)})`;
     if (g.origin && g.radius !== undefined) return `r=${g.radius.toFixed(2)} origin=(${fmtV(g.origin)})`;
     if (g.origin) return `origin=(${fmtV(g.origin)})`;
@@ -631,7 +665,7 @@ export function compareStepFiles(genText, refText, genName = 'generated', refNam
     log(`  Units: generated=${genScale === 1 ? 'mm' : genScale === 25.4 ? 'in' : genScale + 'x'}  reference=${refScale === 1 ? 'mm' : refScale === 25.4 ? 'in' : refScale + 'x'}`);
     log(`  Plane-angle units: generated=${genAngleScale === 1 ? 'rad' : `${genAngleScale.toFixed(6)}rad/unit`}  reference=${refAngleScale === 1 ? 'rad' : `${refAngleScale.toFixed(6)}rad/unit`}`);
     if (genUniqueCones.length !== genGeom.cones.length || refUniqueCones.length !== refGeom.cones.length) {
-        log(`  Cone matching collapses exact duplicate placements: generated=${genGeom.cones.length}→${genUniqueCones.length}  reference=${refGeom.cones.length}→${refUniqueCones.length}`);
+        log(`  Cone matching canonicalizes equivalent placements: generated=${genGeom.cones.length}→${genUniqueCones.length}  reference=${refGeom.cones.length}→${refUniqueCones.length}`);
     }
 
 

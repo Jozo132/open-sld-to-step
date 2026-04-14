@@ -40,7 +40,7 @@ describe('compareStepFiles', () => {
         const { scores, output } = compareStepFiles(generated, reference, 'generated.stp', 'reference.stp');
 
         expect(scores.Cones).toEqual({ matched: 1, total: 1, pct: 100 });
-        expect(output).toContain('Cone matching collapses exact duplicate placements: generated=1→1  reference=2→1');
+        expect(output).toContain('Cone matching canonicalizes equivalent placements: generated=1→1  reference=2→1');
     });
 
     it('keeps distinct cone placements separate', () => {
@@ -55,5 +55,19 @@ describe('compareStepFiles', () => {
         const { scores } = compareStepFiles(generated, reference, 'generated.stp', 'reference.stp');
 
         expect(scores.Cones).toEqual({ matched: 1, total: 2, pct: 50 });
+    });
+
+    it('matches cones that use different section-circle parameterizations', () => {
+        const angle = Math.PI / 4;
+        const generated = buildStep([
+            { origin: [0, 2, 0], radius: 3, angle },
+        ]);
+        const reference = buildStep([
+            { origin: [0, 1, 0], radius: 2, angle },
+        ]);
+
+        const { scores } = compareStepFiles(generated, reference, 'generated.stp', 'reference.stp');
+
+        expect(scores.Cones).toEqual({ matched: 1, total: 1, pct: 100 });
     });
 });

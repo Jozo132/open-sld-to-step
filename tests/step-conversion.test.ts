@@ -35,6 +35,9 @@ const describeWithSamples = hasSamples ? describe : describe.skip;
 const ctc01Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ctc_01_asme1_rd_sw1802.sldprt',
 );
+const ctc02Path = sampleFiles.find(filePath =>
+    basename(filePath).toLowerCase() === 'nist_ctc_02_asme1_rc_sw1802.sldprt',
+);
 const ctc04Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ctc_04_asme1_rd_sw1802.sldprt',
 );
@@ -720,9 +723,6 @@ describe('ParasolidParser', () => {
 
         const ftc09Path = sampleFiles.find(filePath =>
             basename(filePath).toLowerCase() === 'nist_ftc_09_asme1_rd_sw1802.sldprt',
-        );
-        const ctc02Path = sampleFiles.find(filePath =>
-            basename(filePath).toLowerCase() === 'nist_ctc_02_asme1_rc_sw1802.sldprt',
         );
         if (!ftc09Path || !ctc02Path) return;
 
@@ -1667,6 +1667,58 @@ describe('ParasolidParser', () => {
         expect(hasCompletedYAxisPair).toBe(true);
         expect(hasCompletedUpperPair).toBe(true);
         expect(cones).toHaveLength(8);
+    });
+
+    it('builds representative CTC_02 59-degree drill-tip cone faces from same-radius sections', () => {
+        if (!ctc02Path) return;
+
+        const buf = readFileSync(ctc02Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const representativeSurfaceIds = model.surfaces
+            .filter(surface => surface.surfaceType === 'cone')
+            .filter(surface => {
+                const params = surface.params as {
+                    origin: { x: number; y: number; z: number };
+                    axis: { x: number; y: number; z: number };
+                    radius: number;
+                    halfAngle: number;
+                };
+
+                return (
+                    Math.abs(params.origin.x - 35) < 0.1 &&
+                    Math.abs(params.origin.y - 20) < 0.1 &&
+                    Math.abs(params.origin.z + 30) < 0.1 &&
+                    Math.abs(params.axis.z - 1) < 0.01 &&
+                    Math.abs(params.radius - 5.05) < 0.1 &&
+                    Math.abs(params.halfAngle - 59) < 0.02
+                ) || (
+                    Math.abs(params.origin.x + 25) < 0.1 &&
+                    Math.abs(params.origin.y - 128) < 0.1 &&
+                    Math.abs(params.origin.z + 335) < 0.1 &&
+                    Math.abs(params.axis.z + 1) < 0.01 &&
+                    Math.abs(params.radius - 4.19) < 0.1 &&
+                    Math.abs(params.halfAngle - 59) < 0.02
+                ) || (
+                    Math.abs(params.origin.x + 240) < 0.1 &&
+                    Math.abs(params.origin.y - 288) < 0.1 &&
+                    Math.abs(params.origin.z + 185) < 0.1 &&
+                    Math.abs(params.axis.x + 1) < 0.01 &&
+                    Math.abs(params.radius - 4.19) < 0.1 &&
+                    Math.abs(params.halfAngle - 59) < 0.02
+                );
+            })
+            .map(surface => surface.id);
+
+        const coneFaceSurfaceIds = new Set(model.faces.map(face => face.surface));
+
+        expect(representativeSurfaceIds).toHaveLength(3);
+        expect(representativeSurfaceIds.every(surfaceId => coneFaceSurfaceIds.has(surfaceId))).toBe(true);
     });
 });
 
