@@ -102,6 +102,10 @@ function extractRefs(args) {
     return [...args.matchAll(/#(\d+)/g)].map(m => parseInt(m[1], 10));
 }
 
+function entitySignature(e) {
+    return [e.type, ...(e.types ?? []), e.args].join(' ');
+}
+
 function resolvePlaneAngleMeasureFactor(entities, id, seen = new Set()) {
     if (seen.has(id)) return null;
     seen.add(id);
@@ -124,13 +128,17 @@ function resolvePlaneAngleMeasureFactor(entities, id, seen = new Set()) {
 
 function resolvePlaneAngleUnitFactor(entities, id) {
     const e = entities.get(id);
-    if (!e || !e.types.includes('PLANE_ANGLE_UNIT')) return null;
+    if (!e) return null;
 
-    if (e.types.includes('SI_UNIT') && /\.RADIAN\./i.test(e.args)) {
+    const signature = entitySignature(e);
+    const hasPlaneAngleUnit = e.types.includes('PLANE_ANGLE_UNIT') || /PLANE_ANGLE_UNIT\s*\(/i.test(signature);
+    if (!hasPlaneAngleUnit) return null;
+
+    if ((e.types.includes('SI_UNIT') || /SI_UNIT\s*\(/i.test(signature)) && /\.RADIAN\./i.test(signature)) {
         return 1.0;
     }
 
-    if (e.types.includes('CONVERSION_BASED_UNIT')) {
+    if (e.types.includes('CONVERSION_BASED_UNIT') || /CONVERSION_BASED_UNIT\s*\(/i.test(signature)) {
         for (const ref of extractRefs(e.args)) {
             const factor = resolvePlaneAngleMeasureFactor(entities, ref);
             if (factor !== null) return factor;
@@ -142,7 +150,8 @@ function resolvePlaneAngleUnitFactor(entities, id) {
 
 function detectPlaneAngleUnitScale(entities) {
     for (const [, e] of entities) {
-        if (!e.types.includes('GLOBAL_UNIT_ASSIGNED_CONTEXT')) continue;
+        const signature = entitySignature(e);
+        if (!e.types.includes('GLOBAL_UNIT_ASSIGNED_CONTEXT') && !/GLOBAL_UNIT_ASSIGNED_CONTEXT\s*\(/i.test(signature)) continue;
         for (const ref of extractRefs(e.args)) {
             const factor = resolvePlaneAngleUnitFactor(entities, ref);
             if (factor !== null) return factor;

@@ -83,6 +83,36 @@ describe('ParasolidToStepMapper.mapModel', () => {
         // IDs should start from 1 again
         expect(second[0].id).toBe(1);
     });
+
+    it('normalizes degree-like cone half-angles to radians in STEP output', () => {
+        const mapper = new ParasolidToStepMapper();
+        const model: PsModel = {
+            bodies: [{ id: 1, shells: [] }],
+            shells: [],
+            faces: [],
+            loops: [],
+            edges: [],
+            vertices: [{ id: 1, position: { x: 0, y: 0, z: 0 } }],
+            curves: [],
+            surfaces: [{
+                id: 1,
+                surfaceType: 'cone',
+                params: {
+                    origin: { x: 0, y: 0, z: 0 },
+                    axis: { x: 0, y: 1, z: 0 },
+                    radius: 2,
+                    halfAngle: 59,
+                },
+            }],
+        };
+
+        const entities = mapper.mapModel(model);
+        const cone = entities.find(e => e.type === 'CONICAL_SURFACE');
+
+        expect(cone).toBeDefined();
+        expect(cone!.attrs).toContain('1.02974425867665');
+        expect(cone!.attrs).not.toContain(',59.0');
+    });
 });
 
 // ── toStepFile ────────────────────────────────────────────────────────────────

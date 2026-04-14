@@ -198,6 +198,12 @@ export class ParasolidToStepMapper {
         return s.includes('.') ? s : s + '.';
     }
 
+    /** STEP output declares radians, so normalize degree-like stored cone angles. */
+    private static normalizePlaneAngle(v: number): number {
+        if (!Number.isFinite(v)) return 0;
+        return Math.abs(v) > Math.PI ? (v * Math.PI / 180) : v;
+    }
+
     /** Emit a CARTESIAN_POINT entity. */
     private addPoint(label: string, x: number, y: number, z: number): number {
         const f = ParasolidToStepMapper.fmtFloat;
@@ -448,7 +454,7 @@ export class ParasolidToStepMapper {
                     const origin = (p.origin as PsPoint) ?? { x: 0, y: 0, z: 0 };
                     const axis = (p.axis as PsPoint) ?? { x: 0, y: 0, z: 1 };
                     const radius = (p.radius as number) ?? 1;
-                    const halfAngle = (p.halfAngle as number) ?? 0.5;
+                    const halfAngle = ParasolidToStepMapper.normalizePlaneAngle((p.halfAngle as number) ?? 0.5);
                     const axisId = this.addAxis2Placement('', origin, axis, { x: 1, y: 0, z: 0 });
                     const f = ParasolidToStepMapper.fmtFloat;
                     surfId = this.addEntity(
