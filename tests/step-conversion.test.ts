@@ -827,6 +827,293 @@ describe('ParasolidParser', () => {
         });
     });
 
+    it('decodes inline type-0x11 container links from shell payloads', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const links = parser.parseShellInlineContainerLinks();
+
+            expect(links.every(link => link.shellId > 0)).toBe(true);
+            expect(links.every(link => link.segmentIndex >= 0)).toBe(true);
+            expect(links.every(link => link.linkedContainerId > 0)).toBe(true);
+
+            const fileName = basename(filePath).toLowerCase();
+            if (fileName === 'nist_ftc_07_asme1_rd_sw1802.sldprt') {
+                expect(links).toHaveLength(64);
+            }
+            if (fileName === 'nist_ftc_08_asme1_rc_sw1802.sldprt') {
+                expect(links).toHaveLength(58);
+            }
+        }
+    });
+
+    it('stabilizes representative FTC_07 and FTC_08 inline type-0x11 container links', () => {
+        if (!hasSamples) return;
+
+        const ftc07ShellPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_07_asme1_rd_sw1802.sldprt',
+        );
+        const ftc08ShellPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_08_asme1_rc_sw1802.sldprt',
+        );
+        if (!ftc07ShellPath || !ftc08ShellPath) return;
+
+        const ftc07Extraction = SldprtContainerParser.extractParasolid(readFileSync(ftc07ShellPath));
+        expect(ftc07Extraction).not.toBeNull();
+        if (!ftc07Extraction) return;
+
+        const ftc08Extraction = SldprtContainerParser.extractParasolid(readFileSync(ftc08ShellPath));
+        expect(ftc08Extraction).not.toBeNull();
+        if (!ftc08Extraction) return;
+
+        const ftc07Links = new ParasolidParser(ftc07Extraction.data).parseShellInlineContainerLinks();
+        const ftc08Links = new ParasolidParser(ftc08Extraction.data).parseShellInlineContainerLinks();
+
+        expect(ftc07Links.slice(0, 6)).toEqual([
+            { shellId: 2606, segmentIndex: 5, linkedContainerId: 2614 },
+            { shellId: 2641, segmentIndex: 5, linkedContainerId: 435 },
+            { shellId: 2641, segmentIndex: 11, linkedContainerId: 2716 },
+            { shellId: 2727, segmentIndex: 7, linkedContainerId: 2740 },
+            { shellId: 2769, segmentIndex: 5, linkedContainerId: 2773 },
+            { shellId: 6024, segmentIndex: 5, linkedContainerId: 6031 },
+        ]);
+        expect(ftc08Links.slice(0, 6)).toEqual([
+            { shellId: 1137, segmentIndex: 3, linkedContainerId: 1139 },
+            { shellId: 203, segmentIndex: 9, linkedContainerId: 3925 },
+            { shellId: 3976, segmentIndex: 5, linkedContainerId: 3984 },
+            { shellId: 4572, segmentIndex: 9, linkedContainerId: 1047 },
+            { shellId: 4806, segmentIndex: 3, linkedContainerId: 1017 },
+            { shellId: 4814, segmentIndex: 3, linkedContainerId: 972 },
+        ]);
+    });
+
+    it('summarizes inline type-0x11 container graphs', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const graph = parser.parseShellInlineContainerGraph();
+
+            expect(new Set(graph.nodeIds).size).toBe(graph.nodeIds.length);
+            expect(graph.rootIds.every(id => graph.nodeIds.includes(id))).toBe(true);
+            expect(graph.internalLinks.every(link => graph.nodeIds.includes(link.shellId))).toBe(true);
+            expect(graph.internalLinks.every(link => graph.nodeIds.includes(link.linkedContainerId))).toBe(true);
+            expect(graph.externalLinks.every(link => graph.nodeIds.includes(link.shellId))).toBe(true);
+        }
+    });
+
+    it('stabilizes representative FTC_07 and FTC_08 inline type-0x11 container graph summaries', () => {
+        if (!hasSamples) return;
+
+        const ftc07ShellPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_07_asme1_rd_sw1802.sldprt',
+        );
+        const ftc08ShellPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_08_asme1_rc_sw1802.sldprt',
+        );
+        if (!ftc07ShellPath || !ftc08ShellPath) return;
+
+        const ftc07Extraction = SldprtContainerParser.extractParasolid(readFileSync(ftc07ShellPath));
+        expect(ftc07Extraction).not.toBeNull();
+        if (!ftc07Extraction) return;
+
+        const ftc08Extraction = SldprtContainerParser.extractParasolid(readFileSync(ftc08ShellPath));
+        expect(ftc08Extraction).not.toBeNull();
+        if (!ftc08Extraction) return;
+
+        const ftc07Graph = new ParasolidParser(ftc07Extraction.data).parseShellInlineContainerGraph();
+        const ftc08Graph = new ParasolidParser(ftc08Extraction.data).parseShellInlineContainerGraph();
+
+        expect(ftc07Graph.nodeIds).toHaveLength(67);
+        expect(ftc07Graph.rootIds).toHaveLength(67);
+        expect(ftc07Graph.internalLinks).toHaveLength(0);
+        expect(ftc07Graph.externalLinks).toHaveLength(64);
+
+        expect(ftc08Graph.nodeIds).toHaveLength(200);
+        expect(ftc08Graph.rootIds).toHaveLength(200);
+        expect(ftc08Graph.internalLinks).toHaveLength(0);
+        expect(ftc08Graph.externalLinks).toHaveLength(58);
+    });
+
+    it('decodes inline face-like records from shell payloads', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const records = parser.parseShellInlineFaceRecords();
+
+            expect(records.every(record => record.shellId > 0)).toBe(true);
+            expect(records.every(record => record.segmentIndex >= 0)).toBe(true);
+            expect(records.every(record => record.inlineId >= 0 && record.inlineId <= 255)).toBe(true);
+            expect(records.every(record => record.wordLength >= 1)).toBe(true);
+            expect(records.every(record => record.refs.length === record.wordLength - 1)).toBe(true);
+
+            const fileName = basename(filePath).toLowerCase();
+            if (fileName === 'nist_ftc_07_asme1_rd_sw1802.sldprt') {
+                expect(records).toHaveLength(32);
+            }
+            if (fileName === 'nist_ftc_08_asme1_rc_sw1802.sldprt') {
+                expect(records).toHaveLength(65);
+            }
+        }
+    });
+
+    it('stabilizes representative FTC_07 and FTC_08 inline face-like shell records', () => {
+        if (!hasSamples) return;
+
+        const ftc07ShellPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_07_asme1_rd_sw1802.sldprt',
+        );
+        const ftc08ShellPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_08_asme1_rc_sw1802.sldprt',
+        );
+        if (!ftc07ShellPath || !ftc08ShellPath) return;
+
+        const ftc07Extraction = SldprtContainerParser.extractParasolid(readFileSync(ftc07ShellPath));
+        expect(ftc07Extraction).not.toBeNull();
+        if (!ftc07Extraction) return;
+
+        const ftc08Extraction = SldprtContainerParser.extractParasolid(readFileSync(ftc08ShellPath));
+        expect(ftc08Extraction).not.toBeNull();
+        if (!ftc08Extraction) return;
+
+        const ftc07Records = new ParasolidParser(ftc07Extraction.data).parseShellInlineFaceRecords();
+        const ftc08Records = new ParasolidParser(ftc08Extraction.data).parseShellInlineFaceRecords();
+
+        expect(ftc07Records.slice(0, 6)).toEqual([
+            { shellId: 7070, segmentIndex: 6, inlineId: 240, wordLength: 6, refs: [1726, 7073, 823, 834, 1588] },
+            { shellId: 7070, segmentIndex: 8, inlineId: 240, wordLength: 6, refs: [7076, 7075, 841, 7077, 1724] },
+            { shellId: 7070, segmentIndex: 20, inlineId: 221, wordLength: 6, refs: [7085, 7082, 823, 1726, 1724] },
+            { shellId: 7070, segmentIndex: 22, inlineId: 221, wordLength: 6, refs: [1732, 7077, 826, 825, 1586] },
+            { shellId: 7070, segmentIndex: 26, inlineId: 209, wordLength: 6, refs: [7089, 7086, 829, 828, 1584] },
+            { shellId: 7070, segmentIndex: 28, inlineId: 209, wordLength: 6, refs: [7088, 7087, 811, 1728, 1727] },
+        ]);
+
+        expect(ftc08Records[0]).toEqual({
+            shellId: 95,
+            segmentIndex: 0,
+            inlineId: 15,
+            wordLength: 6,
+            refs: [92, 3856, 93, 3859, 2560],
+        });
+        expect(ftc08Records[1].shellId).toBe(95);
+        expect(ftc08Records[1].segmentIndex).toBe(1);
+        expect(ftc08Records[1].inlineId).toBe(20);
+        expect(ftc08Records[1].wordLength).toBe(23);
+        expect(ftc08Records[1].refs.slice(0, 5)).toEqual([11008, 3855, 3840, 32, 62208]);
+        expect(ftc08Records[2]).toEqual({
+            shellId: 95,
+            segmentIndex: 2,
+            inlineId: 15,
+            wordLength: 6,
+            refs: [95, 98, 99, 3858, 3583],
+        });
+        expect(ftc08Records[3].shellId).toBe(95);
+        expect(ftc08Records[3].segmentIndex).toBe(3);
+        expect(ftc08Records[3].inlineId).toBe(19);
+        expect(ftc08Records[3].wordLength).toBe(15);
+        expect(ftc08Records[3].refs.slice(0, 5)).toEqual([11520, 4367, 4864, 271, 5903]);
+        expect(ftc08Records[4]).toEqual({
+            shellId: 95,
+            segmentIndex: 4,
+            inlineId: 23,
+            wordLength: 6,
+            refs: [3859, 3829, 93, 3865, 2189],
+        });
+        expect(ftc08Records[5].shellId).toBe(95);
+        expect(ftc08Records[5].segmentIndex).toBe(5);
+        expect(ftc08Records[5].inlineId).toBe(26);
+        expect(ftc08Records[5].wordLength).toBe(23);
+        expect(ftc08Records[5].refs.slice(0, 5)).toEqual([11520, 3855, 5888, 33, 22784]);
+    });
+
+    it('decodes stable short inline face anchor records from shell payloads', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const records = parser.parseShellInlineFaceAnchorRecords();
+
+            expect(records.every(record => record.shellId > 0)).toBe(true);
+            expect(records.every(record => record.segmentIndex >= 0)).toBe(true);
+            expect(records.every(record => record.inlineId >= 0 && record.inlineId <= 255)).toBe(true);
+            expect(records.every(record => record.coedgeAnchorId > 0)).toBe(true);
+            expect(records.every(record => record.edgeAnchorId > 0)).toBe(true);
+
+            const fileName = basename(filePath).toLowerCase();
+            if (fileName === 'nist_ctc_02_asme1_rc_sw1802.sldprt') {
+                expect(records).toHaveLength(33);
+            }
+            if (fileName === 'nist_ftc_07_asme1_rd_sw1802.sldprt') {
+                expect(records).toHaveLength(32);
+            }
+            if (fileName === 'nist_ftc_08_asme1_rc_sw1802.sldprt') {
+                expect(records).toHaveLength(33);
+            }
+        }
+    });
+
+    it('stabilizes representative FTC_07 and FTC_08 short inline face anchor records', () => {
+        if (!hasSamples) return;
+
+        const ftc07ShellPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_07_asme1_rd_sw1802.sldprt',
+        );
+        const ftc08ShellPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_08_asme1_rc_sw1802.sldprt',
+        );
+        if (!ftc07ShellPath || !ftc08ShellPath) return;
+
+        const ftc07Extraction = SldprtContainerParser.extractParasolid(readFileSync(ftc07ShellPath));
+        expect(ftc07Extraction).not.toBeNull();
+        if (!ftc07Extraction) return;
+
+        const ftc08Extraction = SldprtContainerParser.extractParasolid(readFileSync(ftc08ShellPath));
+        expect(ftc08Extraction).not.toBeNull();
+        if (!ftc08Extraction) return;
+
+        const ftc07Records = new ParasolidParser(ftc07Extraction.data).parseShellInlineFaceAnchorRecords();
+        const ftc08Records = new ParasolidParser(ftc08Extraction.data).parseShellInlineFaceAnchorRecords();
+
+        expect(ftc07Records.slice(0, 6)).toEqual([
+            { shellId: 7070, segmentIndex: 6, inlineId: 240, refAId: 1726, refBId: 7073, coedgeAnchorId: 823, refCId: 834, edgeAnchorId: 1588 },
+            { shellId: 7070, segmentIndex: 8, inlineId: 240, refAId: 7076, refBId: 7075, coedgeAnchorId: 841, refCId: 7077, edgeAnchorId: 1724 },
+            { shellId: 7070, segmentIndex: 20, inlineId: 221, refAId: 7085, refBId: 7082, coedgeAnchorId: 823, refCId: 1726, edgeAnchorId: 1724 },
+            { shellId: 7070, segmentIndex: 22, inlineId: 221, refAId: 1732, refBId: 7077, coedgeAnchorId: 826, refCId: 825, edgeAnchorId: 1586 },
+            { shellId: 7070, segmentIndex: 26, inlineId: 209, refAId: 7089, refBId: 7086, coedgeAnchorId: 829, refCId: 828, edgeAnchorId: 1584 },
+            { shellId: 7070, segmentIndex: 28, inlineId: 209, refAId: 7088, refBId: 7087, coedgeAnchorId: 811, refCId: 1728, edgeAnchorId: 1727 },
+        ]);
+        expect(ftc08Records.slice(0, 6)).toEqual([
+            { shellId: 95, segmentIndex: 0, inlineId: 15, refAId: 92, refBId: 3856, coedgeAnchorId: 93, refCId: 3859, edgeAnchorId: 2560 },
+            { shellId: 95, segmentIndex: 2, inlineId: 15, refAId: 95, refBId: 98, coedgeAnchorId: 99, refCId: 3858, edgeAnchorId: 3583 },
+            { shellId: 95, segmentIndex: 4, inlineId: 23, refAId: 3859, refBId: 3829, coedgeAnchorId: 93, refCId: 3865, edgeAnchorId: 2189 },
+            { shellId: 95, segmentIndex: 6, inlineId: 29, refAId: 2188, refBId: 3866, coedgeAnchorId: 105, refCId: 3860, edgeAnchorId: 2189 },
+            { shellId: 3866, segmentIndex: 0, inlineId: 29, refAId: 3865, refBId: 2188, coedgeAnchorId: 93, refCId: 3871, edgeAnchorId: 2205 },
+            { shellId: 3866, segmentIndex: 2, inlineId: 33, refAId: 3874, refBId: 3862, coedgeAnchorId: 168, refCId: 3866, edgeAnchorId: 2205 },
+        ]);
+    });
+
     it('prefers candidates that contain the explicit raw face edge anchors', () => {
         const scoreRawFaceBoundaryCandidate = (ParasolidParser as unknown as {
             scoreRawFaceBoundaryCandidate: (hint: unknown, candidate: unknown) => { score: number } | null;

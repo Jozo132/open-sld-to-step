@@ -305,6 +305,62 @@ export interface PsFaceRecord {
     dataLength: number;
 }
 
+/** Inline type-0x11 container link recovered from a shell/body payload segment. */
+export interface PsShellInlineContainerLink {
+    /** Raw type-0x11 entity that owns the inline segment. */
+    shellId: number;
+    /** Zero-based segment index within the owning shell payload. */
+    segmentIndex: number;
+    /** Linked type-0x11 container id carried by the inline segment. */
+    linkedContainerId: number;
+}
+
+/** Summary graph derived from inline type-0x11 container-link segments. */
+export interface PsShellInlineContainerGraph {
+    /** Extracted type-0x11 container ids present in the current stream. */
+    nodeIds: number[];
+    /** Containers with no incoming inline links from other extracted type-0x11 nodes. */
+    rootIds: number[];
+    /** Links whose targets resolve to another extracted type-0x11 container. */
+    internalLinks: PsShellInlineContainerLink[];
+    /** Links whose targets do not resolve to an extracted type-0x11 container. */
+    externalLinks: PsShellInlineContainerLink[];
+}
+
+/** Inline face-like record recovered from a non-link type-0x11 payload segment. */
+export interface PsShellInlineFaceRecord {
+    /** Raw type-0x11 entity that owns the inline segment. */
+    shellId: number;
+    /** Zero-based segment index within the owning shell payload. */
+    segmentIndex: number;
+    /** Observed one-byte local face-like id from the segment header. */
+    inlineId: number;
+    /** Total uint16 words in the recovered segment. */
+    wordLength: number;
+    /** Remaining uint16 words after the inline face-like header word. */
+    refs: number[];
+}
+
+/** Stable short inline face-like record with global coedge and edge anchors. */
+export interface PsShellInlineFaceAnchorRecord {
+    /** Raw type-0x11 entity that owns the inline segment. */
+    shellId: number;
+    /** Zero-based segment index within the owning shell payload. */
+    segmentIndex: number;
+    /** Observed one-byte local face-like id from the segment header. */
+    inlineId: number;
+    /** First opaque uint16 ref in the stable short record family. */
+    refAId: number;
+    /** Second opaque uint16 ref in the stable short record family. */
+    refBId: number;
+    /** Stable global coedge anchor at refs[2] for the short record family. */
+    coedgeAnchorId: number;
+    /** Third opaque uint16 ref in the stable short record family. */
+    refCId: number;
+    /** Stable global edge anchor at refs[4] for the short record family. */
+    edgeAnchorId: number;
+}
+
 /** Aligned edge id occurrence found inside a raw face payload. */
 export interface PsFaceEdgeHit {
     /** Raw face entity id that owns the payload hit. */
@@ -552,6 +608,36 @@ export class ParasolidParser {
 
     constructor(buf: Buffer) {
         this.buf = buf;
+    }
+
+    /** Iterate type-0x11 payload segments split by the observed uint16 0x0001 separator. @internal */
+    private forEachShellPayloadSegment(
+        visitor: (entity: RawEntity, segmentIndex: number, words: number[]) => void,
+    ): void {
+        for (const entity of this.extractAllEntities()) {
+            if (entity.type !== ENTITY_SHELL || entity.data.length < 4) continue;
+
+            let segmentIndex = 0;
+            let currentWords: number[] = [];
+
+            for (let offset = 0; offset + 2 <= entity.data.length; offset += 2) {
+                const word = entity.data.readUInt16BE(offset);
+                if (word === 1) {
+                    if (currentWords.length > 0) {
+                        visitor(entity, segmentIndex, currentWords);
+                        segmentIndex++;
+                    }
+                    currentWords = [];
+                    continue;
+                }
+
+                currentWords.push(word);
+            }
+
+            if (currentWords.length > 0) {
+                visitor(entity, segmentIndex, currentWords);
+            }
+        }
     }
 
     /**
@@ -883,6 +969,98 @@ export class ParasolidParser {
                     dataLength: entity.data.length,
                 };
             });
+    }
+
+    /** Decode inline type-0x11 container links embedded inside shell/body payload segments. */
+    parseShellInlineContainerLinks(): PsShellInlineContainerLink[] {
+        const links: PsShellInlineContainerLink[] = [];
+
+        this.forEachShellPayloadSegment((entity, segmentIndex, words) => {
+            if (words.length === 2 && words[0] === ENTITY_SHELL) {
+                links.push({
+                    shellId: entity.id,
+                    segmentIndex,
+                    linkedContainerId: words[1],
+                });
+            }
+        });
+
+        return links;
+    }
+
+    /** Summarize the graph induced by inline type-0x11 container-link segments. */
+    parseShellInlineContainerGraph(): PsShellInlineContainerGraph {
+        const nodeIds = this.extractAllEntities()
+            .filter((entity) => entity.type === ENTITY_SHELL)
+            .map((entity) => entity.id)
+            .sort((left, right) => left - right);
+        const nodeIdSet = new Set(nodeIds);
+        const internalLinks: PsShellInlineContainerLink[] = [];
+        const externalLinks: PsShellInlineContainerLink[] = [];
+
+        for (const link of this.parseShellInlineContainerLinks()) {
+            if (nodeIdSet.has(link.linkedContainerId)) internalLinks.push(link);
+            else externalLinks.push(link);
+        }
+
+        const incomingInternalTargets = new Set(internalLinks.map((link) => link.linkedContainerId));
+        const rootIds = nodeIds.filter((id) => !incomingInternalTargets.has(id));
+
+        return {
+            nodeIds,
+            rootIds,
+            internalLinks,
+            externalLinks,
+        };
+    }
+
+    /** Decode inline face-like records carried by non-link type-0x11 payload segments. */
+    parseShellInlineFaceRecords(): PsShellInlineFaceRecord[] {
+        const records: PsShellInlineFaceRecord[] = [];
+
+        this.forEachShellPayloadSegment((entity, segmentIndex, words) => {
+            if (words.length === 0) return;
+            if (words.length === 2 && words[0] === ENTITY_SHELL) return;
+
+            const firstWord = words[0];
+            const inlineType = firstWord >> 8;
+            if (inlineType !== ENTITY_FACE) return;
+
+            records.push({
+                shellId: entity.id,
+                segmentIndex,
+                inlineId: firstWord & 0xff,
+                wordLength: words.length,
+                refs: words.slice(1),
+            });
+        });
+
+        return records;
+    }
+
+    /** Decode the stable short inline face family that carries global coedge and edge anchors. */
+    parseShellInlineFaceAnchorRecords(): PsShellInlineFaceAnchorRecord[] {
+        const coedgeIds = new Set(this.parseCoedgeRecords().map((record) => record.id));
+        const edgeIds = new Set(this.parseEdgeRecords().map((record) => record.id));
+        if (coedgeIds.size === 0 || edgeIds.size === 0) return [];
+
+        return this.parseShellInlineFaceRecords()
+            .filter((record) => {
+                return record.wordLength === 6
+                    && record.refs.length === 5
+                    && coedgeIds.has(record.refs[2])
+                    && edgeIds.has(record.refs[4]);
+            })
+            .map((record) => ({
+                shellId: record.shellId,
+                segmentIndex: record.segmentIndex,
+                inlineId: record.inlineId,
+                refAId: record.refs[0],
+                refBId: record.refs[1],
+                coedgeAnchorId: record.refs[2],
+                refCId: record.refs[3],
+                edgeAnchorId: record.refs[4],
+            }));
     }
 
     /** Decode aligned edge-id hits embedded in raw face payloads. */
