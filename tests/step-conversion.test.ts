@@ -1551,6 +1551,32 @@ describe('ParasolidParser', () => {
         expect(hasApexCone).toBe(true);
     });
 
+    it('does not turn representative CTC_04 through-hole chamfers into 59-degree tip cones', () => {
+        if (!ctc04Path) return;
+
+        const buf = readFileSync(ctc04Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasArtificialTipCone = model.surfaces
+            .filter(surface => surface.surfaceType === 'cone')
+            .some(surface => coneMatchesCanonical(
+                surface.params as TestConeParams,
+                {
+                    origin: { x: 35, y: 20, z: -4.2061900511779 },
+                    axis: { x: 0, y: 0, z: 1 },
+                    radius: 0,
+                    halfAngle: 59,
+                },
+            ));
+
+        expect(hasArtificialTipCone).toBe(false);
+    });
+
     it('recovers the CTC_01 59-degree drill-tip cones from raw cylinder sections', () => {
         if (!ctc01Path) return;
 

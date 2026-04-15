@@ -3783,6 +3783,50 @@ export class ParasolidParser {
         };
     }
 
+    /**
+     * Reject 59-degree zero-support drill-tip candidates that already lie on a
+     * recovered 45-degree countersink cone. Those are through-hole chamfer
+     * edges, not blind drill tips.
+     */
+    private hasOverlappingCountersinkCone(
+        cylinder: PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        },
+        existingCones: PsSurface[],
+    ): boolean {
+        const cylAxis = ParasolidParser.normalizeDirection(cylinder.params.axis);
+
+        return existingCones.filter((surface): surface is PsSurface & {
+            surfaceType: 'cone';
+            params: { origin: PsPoint; axis: PsPoint; radius: number; halfAngle: number };
+        } => surface.surfaceType === 'cone').some((cone) => {
+            const halfAngle = ParasolidParser.coneHalfAngleRadians(cone.params.halfAngle);
+            if (Math.abs(halfAngle - ParasolidParser.INFERRED_APEX_CONE_ANGLE) >
+                ParasolidParser.INFERRED_APEX_CONE_ANGLE_TOL) {
+                return false;
+            }
+
+            const coneAxis = ParasolidParser.normalizeDirection(cone.params.axis);
+            const dot = cylAxis.x * coneAxis.x + cylAxis.y * coneAxis.y + cylAxis.z * coneAxis.z;
+            if (Math.abs(Math.abs(dot) - 1) > 0.02) return false;
+            if (ParasolidParser.axisLineDistance(cylinder.params.origin, cone.params.origin, coneAxis) >
+                ParasolidParser.INFERRED_APEX_CONE_LINE_TOL) {
+                return false;
+            }
+
+            const dx = cylinder.params.origin.x - cone.params.origin.x;
+            const dy = cylinder.params.origin.y - cone.params.origin.y;
+            const dz = cylinder.params.origin.z - cone.params.origin.z;
+            const h = dx * coneAxis.x + dy * coneAxis.y + dz * coneAxis.z;
+            const expectedRadius = cone.params.radius + h * Math.tan(halfAngle);
+            if (!isFinite(expectedRadius) || expectedRadius < 0) return false;
+
+            return Math.abs(expectedRadius - cylinder.params.radius) <=
+                ParasolidParser.CONE_SECTION_RADIUS_TOL;
+        });
+    }
+
     /** Normalize stored cone angles so trig always uses radians. */
     private static coneHalfAngleRadians(halfAngle: number): number {
         if (!isFinite(halfAngle)) return 0;
@@ -4014,6 +4058,7 @@ export class ParasolidParser {
     private inferDrillTipConesFromRawCylinderSections(
         rawSurfaces: PsSurface[],
         vertices: PsVertex[],
+        existingCones: PsSurface[] = [],
     ): PsSurface[] {
         const cylinders = rawSurfaces.filter((surface): surface is PsSurface & {
             surfaceType: 'cylinder';
@@ -4037,6 +4082,8 @@ export class ParasolidParser {
         if (!isFinite(tanHalfAngle) || Math.abs(tanHalfAngle) < 1e-6) return [];
 
         for (const cylinder of zeroSupportCylinders) {
+            if (this.hasOverlappingCountersinkCone(cylinder, existingCones)) continue;
+
             const axis = ParasolidParser.normalizeDirection(cylinder.params.axis);
             const hasCompetingSectionAtOrigin = cylinders.some((other) => {
                 if (other.id === cylinder.id) return false;
@@ -4052,6 +4099,10 @@ export class ParasolidParser {
             if (hasCompetingSectionAtOrigin) continue;
 
             let nearestAheadGap = Infinity;
+            let nearestAheadSection: (PsSurface & {
+                surfaceType: 'cylinder';
+                params: { origin: PsPoint; axis: PsPoint; radius: number };
+            }) | null = null;
 
             for (const other of zeroSupportCylinders) {
                 if (other.id === cylinder.id) continue;
@@ -4069,10 +4120,16 @@ export class ParasolidParser {
                     (other.params.origin.z - cylinder.params.origin.z) * axis.z;
                 if (gap < ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_GAP_MIN ||
                     gap > ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_GAP_MAX) continue;
-                if (gap < nearestAheadGap) nearestAheadGap = gap;
+                if (gap < nearestAheadGap) {
+                    nearestAheadGap = gap;
+                    nearestAheadSection = other;
+                }
             }
 
             if (!isFinite(nearestAheadGap)) continue;
+            if (nearestAheadSection && this.hasOverlappingCountersinkCone(nearestAheadSection, existingCones)) {
+                continue;
+            }
 
             const apexOffset = cylinder.params.radius / tanHalfAngle;
             const apexOrigin: PsPoint = {
@@ -5300,7 +5357,7 @@ export class ParasolidParser {
         // Apply narrow cone recovery after the washer pass so it sees the same
         // consolidated cylinder inventory as the bounded-topology builder.
         const apexCones = this.inferApexConesFromCylinderPairs(mergedSurfaces, vertices);
-        const directDrillTipCones = this.inferDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices);
+        const directDrillTipCones = this.inferDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices, apexCones);
         const halfRadiusDrillTipCones = this.inferHalfRadiusDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices);
         const repeatedCenterDrillTipCones = this.inferRepeatedCenterCylinderDrillTipCones(
             validatedSurfaces,
