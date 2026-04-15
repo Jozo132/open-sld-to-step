@@ -25,6 +25,7 @@
     "convert": "npm run build && node scripts/convert-all.mjs",
     "compare": "node scripts/compare-step.mjs",
     "compare-all": "node scripts/compare-all.mjs",
+    "compare-all:verbose": "node scripts/compare-all.mjs --verbose",
     "download-samples": "node scripts/download-nist-samples.mjs"
   },
   "keywords": [

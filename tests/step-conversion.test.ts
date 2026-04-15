@@ -1658,6 +1658,60 @@ describe('ParasolidParser', () => {
         expect(hasLargeZFrustum).toBe(true);
     });
 
+    it('does not keep the CTC_05 sub-degree raw cone artifacts as conical surfaces', () => {
+        if (!ctc05Path) return;
+
+        const buf = readFileSync(ctc05Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasSubDegreeArtifact = model.surfaces
+            .filter(surface => surface.surfaceType === 'cone')
+            .some(surface => coneMatchesCanonical(
+                surface.params as TestConeParams,
+                {
+                    origin: { x: 95.25, y: -83.17423889221735, z: 133.35 },
+                    axis: { x: 0, y: -0.9762960071199333, z: 0.21643961393810335 },
+                    radius: 6.504174915897134,
+                    halfAngle: 0.00635,
+                },
+                0.1,
+                0.001,
+            ));
+
+        expect(hasSubDegreeArtifact).toBe(false);
+    });
+
+    it('does not infer the CTC_05 stepped ring counterbores as 59-degree tip cones', () => {
+        if (!ctc05Path) return;
+
+        const buf = readFileSync(ctc05Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasFalseRingTipCone = model.surfaces
+            .filter(surface => surface.surfaceType === 'cone')
+            .some(surface => coneMatchesCanonical(
+                surface.params as TestConeParams,
+                {
+                    origin: { x: -192.47414599109146, y: -111.125, z: -5.723197396237518 },
+                    axis: { x: 0, y: 0, z: 1 },
+                    radius: 0,
+                    halfAngle: 59,
+                },
+            ));
+
+        expect(hasFalseRingTipCone).toBe(false);
+    });
+
     it('recovers the CTC_01 59-degree drill-tip cones from raw cylinder sections', () => {
         if (!ctc01Path) return;
 

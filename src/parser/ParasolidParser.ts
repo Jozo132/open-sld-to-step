@@ -2817,7 +2817,7 @@ export class ParasolidParser {
                 };
                 const sRadius = radius * PS_TO_MM;
 
-                if (Math.abs(semiAngle) < 1e-6) {
+                if (Math.abs(semiAngle) < ParasolidParser.RAW_CONE_SEMIANGLE_MIN) {
                     surfaces.push({
                         id: nextId++,
                         surfaceType: 'cylinder',
@@ -2886,7 +2886,7 @@ export class ParasolidParser {
                 };
                 const sRadius = radius * PS_TO_MM;
 
-                if (Math.abs(semiAngle) < 1e-6) {
+                if (Math.abs(semiAngle) < ParasolidParser.RAW_CONE_SEMIANGLE_MIN) {
                     surfaces.push({
                         id: nextId++,
                         surfaceType: 'cylinder',
@@ -3178,6 +3178,7 @@ export class ParasolidParser {
     private static readonly CYL_ORIGIN_TOL = 0.5;   // mm — axis line distance
     private static readonly CYL_RADIUS_TOL = 0.01;  // mm
     private static readonly CONE_SECTION_RADIUS_TOL = 0.1; // mm — coaxial section match
+    private static readonly RAW_CONE_SEMIANGLE_MIN = 0.01; // rad — preserve 1°/2° cones, drop cylinder noise
     private static readonly VERTEX_CYL_TOL = 0.5;   // mm — vertex on cylinder
     private static readonly VERTEX_TORUS_TOL = 0.5; // mm — vertex on torus tube
     // Cone recovery from coaxial cylinder section transitions.
@@ -3862,6 +3863,44 @@ export class ParasolidParser {
     }
 
     /**
+     * Reject same-radius drill-tip candidates whose forward section already
+     * starts a larger coaxial step at the same origin. That pattern matches a
+     * stepped counterbore stack, not a blind drill tip.
+     */
+    private hasCompetingLargerSectionAtOrigin(
+        cylinder: PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        },
+        cylinders: Array<PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        }>,
+    ): boolean {
+        const axis = ParasolidParser.normalizeDirection(cylinder.params.axis);
+
+        return cylinders.some((other) => {
+            if (other.id === cylinder.id) return false;
+            if (other.params.radius <= cylinder.params.radius + ParasolidParser.CYL_RADIUS_TOL) {
+                return false;
+            }
+
+            const otherAxis = ParasolidParser.normalizeDirection(other.params.axis);
+            const dot = axis.x * otherAxis.x + axis.y * otherAxis.y + axis.z * otherAxis.z;
+            if (dot < 0.98) return false;
+            if (ParasolidParser.axisLineDistance(cylinder.params.origin, other.params.origin, axis) >
+                ParasolidParser.INFERRED_APEX_CONE_LINE_TOL) {
+                return false;
+            }
+
+            const dx = cylinder.params.origin.x - other.params.origin.x;
+            const dy = cylinder.params.origin.y - other.params.origin.y;
+            const dz = cylinder.params.origin.z - other.params.origin.z;
+            return Math.sqrt(dx * dx + dy * dy + dz * dz) <= ParasolidParser.CYL_ORIGIN_TOL;
+        });
+    }
+
+    /**
      * Reject zero-support drill-tip candidates that have a closer
      * opposite-direction same-radius peer on the same line than the forward
      * same-direction section used to infer the drill tip. That pattern marks a
@@ -4261,6 +4300,9 @@ export class ParasolidParser {
 
             if (!isFinite(nearestAheadGap)) continue;
             if (nearestAheadSection && this.hasOverlappingCountersinkCone(nearestAheadSection, existingCones)) {
+                continue;
+            }
+            if (nearestAheadSection && this.hasCompetingLargerSectionAtOrigin(nearestAheadSection, cylinders)) {
                 continue;
             }
             if (this.hasCloserOppositeDirectionPeer(cylinder, zeroSupportCylinders, nearestAheadGap)) continue;

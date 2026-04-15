@@ -9,7 +9,8 @@ A clean-room, open-source Node.js and WASM library for parsing Microsoft OLE Str
 | `npm run test:bun` | Run the full suite explicitly with Bun |
 | `npm run test:jest` | Run the full suite explicitly with Jest |
 | `npm run test:integration` | Run only `brep-extraction.test.ts` with the preferred runner |
-| `npm run compare-all` | Compare generated STEP files against the NIST references, print the full report, and rewrite `performance-results.md` |
+| `npm run compare-all` | Compare generated STEP files against the NIST references, print only the summary and match-count tables, and rewrite `performance-results.md` |
+| `npm run compare-all:verbose` | Compare generated STEP files against the NIST references, print the tables plus the full per-file report, and rewrite `performance-results.md` |
 
 ## Performance Tracking
 

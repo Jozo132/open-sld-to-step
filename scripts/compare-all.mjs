@@ -4,10 +4,13 @@
  *
  * Output:
  *   1. Summary table — one row per file, columns for each score metric + overall
- *   2. Full detailed comparison for each file below the table
+ *   2. Match-count table — one row per file with matched/total counts per metric
+ *   3. Optional full detailed comparison for each file when verbose mode is enabled
  *
  * Usage:  node scripts/compare-all.mjs
+ *         node scripts/compare-all.mjs --verbose
  *         npm run compare-all
+ *         npm run compare-all:verbose
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -221,16 +224,27 @@ export function renderConsoleSummary(results) {
     }
 
     console.log(sepChar.repeat(nameW + 2 + (colW + 1) * (scoreKeys.length + 1)));
+    const avgCells = scoreKeys.map(key => `${averages[key].toFixed(1)}%`.padStart(colW)).join(' ');
+    console.log(`${'AVERAGE'.padEnd(nameW)}  ${avgCells} ${(`${averageOverall.toFixed(1)}%`).padStart(colW)}`);
+    console.log('═'.repeat(nameW + 2 + (colW + 1) * (scoreKeys.length + 1)));
+}
+
+export function renderConsoleMatchCounts(results) {
+    console.log('\n' + '═'.repeat(nameW + 2 + (colW + 1) * scoreKeys.length));
+    console.log('  STEP COMPARISON — MATCH COUNTS');
+    console.log('═'.repeat(nameW + 2 + (colW + 1) * scoreKeys.length));
+
+    const hdrCols = scoreKeys.map(k => k.padStart(colW)).join(' ');
+    console.log(`${'File'.padEnd(nameW)}  ${hdrCols}`);
+    console.log(sepChar.repeat(nameW + 2 + (colW + 1) * scoreKeys.length));
+
     for (const result of results) {
         const name = shortName(result.genFile).padEnd(nameW);
         const cells = scoreKeys.map(key => fmtRatio(result.scores[key])).join(' ');
         console.log(`${name}  ${cells}`);
     }
 
-    console.log(sepChar.repeat(nameW + 2 + (colW + 1) * (scoreKeys.length + 1)));
-    const avgCells = scoreKeys.map(key => `${averages[key].toFixed(1)}%`.padStart(colW)).join(' ');
-    console.log(`${'AVERAGE'.padEnd(nameW)}  ${avgCells} ${(`${averageOverall.toFixed(1)}%`).padStart(colW)}`);
-    console.log('═'.repeat(nameW + 2 + (colW + 1) * (scoreKeys.length + 1)));
+    console.log('═'.repeat(nameW + 2 + (colW + 1) * scoreKeys.length));
 }
 
 function renderDetailedOutput(results) {
@@ -245,6 +259,8 @@ function renderDetailedOutput(results) {
 }
 
 export function runCompareAllCli() {
+    const args = process.argv.slice(2);
+    const verbose = args.includes('--verbose') || args.includes('verbose') || args.includes(':verbose');
     const { results, skipped } = compareAllFiles();
 
     for (const genFile of skipped) {
@@ -257,9 +273,10 @@ export function runCompareAllCli() {
     }
 
     renderConsoleSummary(results);
+    renderConsoleMatchCounts(results);
     writePerformanceResults(results);
     console.log(`\nUpdated ${path.basename(PERFORMANCE_RESULTS_PATH)}`);
-    renderDetailedOutput(results);
+    if (verbose) renderDetailedOutput(results);
 }
 
 const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
