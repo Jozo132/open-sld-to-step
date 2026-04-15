@@ -305,6 +305,26 @@ export interface PsFaceRecord {
     dataLength: number;
 }
 
+/** Stable 30-69 byte window recovered from longer raw FACE payloads. */
+export interface PsFaceInlineWindowRecord {
+    /** Raw face entity id that owns the inline window. */
+    faceId: number;
+    /** Embedded shell id when the [00 11][id][00 01] marker is present. */
+    shellId: number | null;
+    /** Number of uint16 words preserved from the 30-69 byte window. */
+    wordLength: number;
+    /** Raw uint16 words from bytes 30-69 inclusive. */
+    words: number[];
+    /** Marker word at bytes 34-35, commonly 0x2B00 or 0x2D00. */
+    markerWord: number;
+    /** Inline tag-like word at bytes 36-37, commonly 0x11xx or 0x0Fxx. */
+    inlineTagWord: number;
+    /** Whether the tail word at bytes 64-65 repeats the owning face id. */
+    hasSelfFaceTail: boolean;
+    /** Whether the tail word at bytes 68-69 repeats the embedded shell id. */
+    hasSelfShellTail: boolean;
+}
+
 /** Inline type-0x11 container link recovered from a shell/body payload segment. */
 export interface PsShellInlineContainerLink {
     /** Raw type-0x11 entity that owns the inline segment. */
@@ -967,6 +987,34 @@ export class ParasolidParser {
                     coedgeAnchorBId: coedgeIds.has(coedgeAnchorBId) ? coedgeAnchorBId : null,
                     edgeAnchorBId: edgeIds.has(edgeAnchorBId) ? edgeAnchorBId : null,
                     dataLength: entity.data.length,
+                };
+            });
+    }
+
+    /** Decode the stable 30-69 byte window carried by longer raw FACE payloads. */
+    parseFaceInlineWindowRecords(): PsFaceInlineWindowRecord[] {
+        return this.extractAllEntities()
+            .filter((entity) => entity.type === ENTITY_FACE && entity.data.length >= 70)
+            .map((entity) => {
+                const shellId = entity.data.length >= 18
+                    && entity.data.readUInt16BE(12) === ENTITY_SHELL
+                    && entity.data.readUInt16BE(16) === 1
+                    ? entity.data.readUInt16BE(14)
+                    : null;
+                const words: number[] = [];
+                for (let byteOffset = 30; byteOffset < 70; byteOffset += 2) {
+                    words.push(entity.data.readUInt16BE(byteOffset));
+                }
+
+                return {
+                    faceId: entity.id,
+                    shellId,
+                    wordLength: words.length,
+                    words,
+                    markerWord: words[2],
+                    inlineTagWord: words[3],
+                    hasSelfFaceTail: words[17] === entity.id,
+                    hasSelfShellTail: shellId !== null && words[19] === shellId,
                 };
             });
     }

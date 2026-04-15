@@ -678,6 +678,94 @@ describe('ParasolidParser', () => {
         });
     });
 
+    it('decodes the stable 30-69 raw face inline window from longer face payloads', () => {
+        if (!hasSamples) return;
+
+        for (const filePath of sampleFiles) {
+            const buf = readFileSync(filePath);
+            const extraction = SldprtContainerParser.extractParasolid(buf);
+            expect(extraction).not.toBeNull();
+            if (!extraction) continue;
+
+            const parser = new ParasolidParser(extraction.data);
+            const records = parser.parseFaceInlineWindowRecords();
+
+            expect(records.every(record => record.faceId > 0)).toBe(true);
+            expect(records.every(record => record.wordLength === 20)).toBe(true);
+            expect(records.every(record => record.words.length === record.wordLength)).toBe(true);
+            expect(records.every(record => record.markerWord === record.words[2])).toBe(true);
+            expect(records.every(record => record.inlineTagWord === record.words[3])).toBe(true);
+
+            const fileName = basename(filePath).toLowerCase();
+            if (fileName === 'nist_ctc_02_asme1_rc_sw1802.sldprt') {
+                expect(records).toHaveLength(3);
+            }
+            if (fileName === 'nist_ftc_07_asme1_rd_sw1802.sldprt') {
+                expect(records).toHaveLength(3);
+            }
+            if (fileName === 'nist_ftc_08_asme1_rc_sw1802.sldprt') {
+                expect(records).toHaveLength(32);
+            }
+        }
+    });
+
+    it('stabilizes representative FTC_08 raw face inline window records', () => {
+        if (!hasSamples) return;
+        const targetPath = sampleFiles.find(filePath =>
+            basename(filePath).toLowerCase() === 'nist_ftc_08_asme1_rc_sw1802.sldprt',
+        );
+        if (!targetPath) return;
+
+        const buf = readFileSync(targetPath);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const records = new Map(parser.parseFaceInlineWindowRecords().map(record => [record.faceId, record]));
+
+        expect(records.get(4668)).toEqual({
+            faceId: 4668,
+            shellId: 1005,
+            wordLength: 20,
+            words: [1, 4662, 11008, 4356, 8960, 274, 15378, 14345, 51716, 8451, 59921, 60672, 274, 15149, 17, 2506, 1, 4668, 1059, 1005],
+            markerWord: 11008,
+            inlineTagWord: 4356,
+            hasSelfFaceTail: true,
+            hasSelfShellTail: true,
+        });
+        expect(records.get(5307)).toEqual({
+            faceId: 5307,
+            shellId: 4419,
+            wordLength: 20,
+            words: [1, 7503, 11008, 4381, 18944, 276, 47901, 19714, 33538, 33804, 22028, 21248, 285, 19501, 17, 7502, 1, 7504, 637, 649],
+            markerWord: 11008,
+            inlineTagWord: 4381,
+            hasSelfFaceTail: false,
+            hasSelfShellTail: false,
+        });
+        expect(records.get(7640)).toEqual({
+            faceId: 7640,
+            shellId: 7648,
+            wordLength: 20,
+            words: [1, 1, 11520, 3869, 57600, 13, 65024, 285, 58387, 797, 58624, 4381, 58368, 285, 57629, 58397, 58368, 285, 58885, 43520],
+            markerWord: 11520,
+            inlineTagWord: 3869,
+            hasSelfFaceTail: false,
+            hasSelfShellTail: false,
+        });
+        expect(records.get(7132)).toEqual({
+            faceId: 7132,
+            shellId: 308,
+            wordLength: 20,
+            words: [1, 7185, 11008, 4353, 14080, 283, 56321, 14849, 13313, 13596, 4358, 62464, 284, 4651, 17, 317, 1, 7132, 308, 320],
+            markerWord: 11008,
+            inlineTagWord: 4353,
+            hasSelfFaceTail: true,
+            hasSelfShellTail: false,
+        });
+    });
+
     it('decodes aligned face-edge hits from raw face payloads', () => {
         if (!hasSamples) return;
 
