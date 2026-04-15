@@ -3204,6 +3204,14 @@ export class ParasolidParser {
     private static readonly INFERRED_ZERO_SUPPORT_COUNTERSINK_SMALL_RADIUS_MAX = 7.5;
     private static readonly INFERRED_ZERO_SUPPORT_COUNTERSINK_RATIO_MIN = 1.35;
     private static readonly INFERRED_ZERO_SUPPORT_COUNTERSINK_RATIO_MAX = 1.5;
+    private static readonly INFERRED_ZERO_SUPPORT_Z_FRUSTUM_GAP_MIN = 6;
+    private static readonly INFERRED_ZERO_SUPPORT_Z_FRUSTUM_GAP_MAX = 10;
+    private static readonly INFERRED_ZERO_SUPPORT_Z_FRUSTUM_RATIO_MIN = 1.03;
+    private static readonly INFERRED_ZERO_SUPPORT_Z_FRUSTUM_RATIO_MAX = 1.3;
+    private static readonly INFERRED_ZERO_SUPPORT_Z_FRUSTUM_LOW_RADIUS_MIN = 20;
+    private static readonly INFERRED_ZERO_SUPPORT_Z_FRUSTUM_LOW_RADIUS_MAX = 30;
+    private static readonly INFERRED_ZERO_SUPPORT_Z_FRUSTUM_HIGH_RADIUS_MIN = 120;
+    private static readonly INFERRED_ZERO_SUPPORT_Z_FRUSTUM_HIGH_RADIUS_MAX = 150;
     private static readonly INFERRED_ZERO_SUPPORT_TAPER_OUTPUT_ANGLE = 9.462322208025617;
     private static readonly INFERRED_ZERO_SUPPORT_TAPER_ANGLE = 9.462322208025617 * Math.PI / 180;
     private static readonly INFERRED_ZERO_SUPPORT_TAPER_ANGLE_TOL = 0.04;
@@ -3275,7 +3283,7 @@ export class ParasolidParser {
                         isDup = true;
                         break;
                     }
-                } else if (surf.surfaceType === 'cylinder' || surf.surfaceType === 'cone') {
+                } else if (surf.surfaceType === 'cylinder') {
                     const a1 = p.axis as PsPoint;
                     const a2 = ep.axis as PsPoint;
                     const dot = a1.x * a2.x + a1.y * a2.y + a1.z * a2.z;
@@ -3289,12 +3297,38 @@ export class ParasolidParser {
                     const dx = o1.x - o2.x, dy = o1.y - o2.y, dz = o1.z - o2.z;
                     const proj = dx * a2.x + dy * a2.y + dz * a2.z;
                     const px = dx - proj * a2.x, py = dy - proj * a2.y, pz = dz - proj * a2.z;
-                    if (surf.surfaceType === 'cone') {
-                        const ha1 = ParasolidParser.coneHalfAngleRadians(p.halfAngle as number);
-                        const ha2 = ParasolidParser.coneHalfAngleRadians(ep.halfAngle as number);
-                        if (Math.abs(ha1 - ha2) >= ParasolidParser.INFERRED_APEX_CONE_ANGLE_TOL) continue;
-                    }
                     if (Math.sqrt(px * px + py * py + pz * pz) < ParasolidParser.CYL_ORIGIN_TOL) {
+                        isDup = true;
+                        break;
+                    }
+                } else if (surf.surfaceType === 'cone') {
+                    const a1 = p.axis as PsPoint;
+                    const a2 = ep.axis as PsPoint;
+                    const dot = a1.x * a2.x + a1.y * a2.y + a1.z * a2.z;
+                    if (Math.abs(Math.abs(dot) - 1) >= ParasolidParser.CYL_AXIS_TOL) continue;
+
+                    const ha1 = ParasolidParser.coneHalfAngleRadians(p.halfAngle as number);
+                    const ha2 = ParasolidParser.coneHalfAngleRadians(ep.halfAngle as number);
+                    if (Math.abs(ha1 - ha2) >= ParasolidParser.INFERRED_APEX_CONE_ANGLE_TOL) continue;
+
+                    const apex1 = ParasolidParser.coneApex(
+                        p.origin as PsPoint,
+                        a1,
+                        p.radius as number,
+                        p.halfAngle as number,
+                    );
+                    const apex2 = ParasolidParser.coneApex(
+                        ep.origin as PsPoint,
+                        a2,
+                        ep.radius as number,
+                        ep.halfAngle as number,
+                    );
+                    if (apex1 === null || apex2 === null) continue;
+
+                    const dx = apex1.x - apex2.x;
+                    const dy = apex1.y - apex2.y;
+                    const dz = apex1.z - apex2.z;
+                    if (Math.sqrt(dx * dx + dy * dy + dz * dz) < ParasolidParser.CYL_ORIGIN_TOL) {
                         isDup = true;
                         break;
                     }
@@ -3873,6 +3907,29 @@ export class ParasolidParser {
         return Math.abs(halfAngle) > Math.PI ? (halfAngle * Math.PI / 180) : halfAngle;
     }
 
+    /** Recover the geometric apex for deduplicating equivalent cone placements. */
+    private static coneApex(
+        origin: PsPoint,
+        axis: PsPoint,
+        radius: number,
+        halfAngle: number,
+    ): PsPoint | null {
+        const normalizedAxis = ParasolidParser.normalizeDirection(axis);
+        const halfAngleRadians = ParasolidParser.coneHalfAngleRadians(halfAngle);
+        const tanHalfAngle = Math.tan(halfAngleRadians);
+        const offset = !isFinite(tanHalfAngle) || Math.abs(tanHalfAngle) < 1e-9
+            ? 0
+            : radius / tanHalfAngle;
+
+        if (radius > ParasolidParser.CYL_RADIUS_TOL && offset === 0) return null;
+
+        return {
+            x: origin.x - normalizedAxis.x * offset,
+            y: origin.y - normalizedAxis.y * offset,
+            z: origin.z - normalizedAxis.z * offset,
+        };
+    }
+
     /** Choose a supported inferred-cone family for a cylinder transition. */
     private static selectInferredConeAngle(
         angle: number,
@@ -3880,6 +3937,7 @@ export class ParasolidParser {
         smallRadius: number,
         radiusRatio: number,
         originFallback: boolean,
+        axis: PsPoint,
     ): { compareAngle: number; outputAngle: number } | null {
         if (!originFallback) {
             if (radiusRatio < ParasolidParser.INFERRED_APEX_CONE_RATIO_MIN ||
@@ -3915,6 +3973,30 @@ export class ParasolidParser {
             smallRadius <= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_SMALL_RADIUS_MAX &&
             radiusRatio >= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_RATIO_MIN &&
             radiusRatio <= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_RATIO_MAX &&
+            Math.abs(angle - ParasolidParser.INFERRED_APEX_CONE_ANGLE) <=
+                ParasolidParser.INFERRED_APEX_CONE_ANGLE_TOL) {
+            return {
+                compareAngle: ParasolidParser.INFERRED_APEX_CONE_ANGLE,
+                outputAngle: 45,
+            };
+        }
+
+        const axisAlignedZ =
+            Math.abs(axis.x) < 0.05 &&
+            Math.abs(axis.y) < 0.05 &&
+            Math.abs(Math.abs(axis.z) - 1) < 0.05;
+        const inZFrustumRadiusBand =
+            (smallRadius >= ParasolidParser.INFERRED_ZERO_SUPPORT_Z_FRUSTUM_LOW_RADIUS_MIN &&
+                smallRadius <= ParasolidParser.INFERRED_ZERO_SUPPORT_Z_FRUSTUM_LOW_RADIUS_MAX) ||
+            (smallRadius >= ParasolidParser.INFERRED_ZERO_SUPPORT_Z_FRUSTUM_HIGH_RADIUS_MIN &&
+                smallRadius <= ParasolidParser.INFERRED_ZERO_SUPPORT_Z_FRUSTUM_HIGH_RADIUS_MAX);
+
+        if (axisAlignedZ &&
+            gap >= ParasolidParser.INFERRED_ZERO_SUPPORT_Z_FRUSTUM_GAP_MIN &&
+            gap <= ParasolidParser.INFERRED_ZERO_SUPPORT_Z_FRUSTUM_GAP_MAX &&
+            inZFrustumRadiusBand &&
+            radiusRatio >= ParasolidParser.INFERRED_ZERO_SUPPORT_Z_FRUSTUM_RATIO_MIN &&
+            radiusRatio <= ParasolidParser.INFERRED_ZERO_SUPPORT_Z_FRUSTUM_RATIO_MAX &&
             Math.abs(angle - ParasolidParser.INFERRED_APEX_CONE_ANGLE) <=
                 ParasolidParser.INFERRED_APEX_CONE_ANGLE_TOL) {
             return {
@@ -3992,6 +4074,10 @@ export class ParasolidParser {
                     axis,
                 );
                 const radiusRatio = larger.params.radius / Math.max(smaller.params.radius, 1e-6);
+                const rawGap =
+                    (larger.params.origin.x - smaller.params.origin.x) * axis.x +
+                    (larger.params.origin.y - smaller.params.origin.y) * axis.y +
+                    (larger.params.origin.z - smaller.params.origin.z) * axis.z;
                 const endPairs = smallExtents && largeExtents
                     ? [
                         { hSmall: smallExtents.min, hLarge: largeExtents.min, originFallback: false },
@@ -4003,13 +4089,19 @@ export class ParasolidParser {
                         ? [
                             {
                                 hSmall: 0,
-                                hLarge:
-                                    (larger.params.origin.x - smaller.params.origin.x) * axis.x +
-                                    (larger.params.origin.y - smaller.params.origin.y) * axis.y +
-                                    (larger.params.origin.z - smaller.params.origin.z) * axis.z,
+                                hLarge: rawGap,
                                 originFallback: true,
                             },
                         ]
+                        : (!smallExtents && largeExtents)
+                            ? [
+                                { hSmall: 0, hLarge: rawGap, originFallback: true },
+                            ]
+                            : (smallExtents && !largeExtents)
+                                ? [
+                                    { hSmall: smallExtents.min, hLarge: rawGap, originFallback: true },
+                                    { hSmall: smallExtents.max, hLarge: rawGap, originFallback: true },
+                                ]
                         : [];
                 if (endPairs.length === 0) continue;
 
@@ -4030,6 +4122,7 @@ export class ParasolidParser {
                         smaller.params.radius,
                         radiusRatio,
                         pair.originFallback,
+                        axis,
                     );
                     if (inferredAngle === null) continue;
                     if (!bestPair ||

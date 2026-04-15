@@ -41,6 +41,9 @@ const ctc02Path = sampleFiles.find(filePath =>
 const ctc04Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ctc_04_asme1_rd_sw1802.sldprt',
 );
+const ctc05Path = sampleFiles.find(filePath =>
+    basename(filePath).toLowerCase() === 'nist_ctc_05_asme1_rd_sw1802.sldprt',
+);
 const ftc06Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ftc_06_asme1_rd_sw1802.sldprt',
 );
@@ -1601,6 +1604,58 @@ describe('ParasolidParser', () => {
             ));
 
         expect(hasMirroredThroughHoleTipCone).toBe(false);
+    });
+
+    it('preserves the mirrored +X CTC_05 59-degree drill-tip cones after cone deduplication', () => {
+        if (!ctc05Path) return;
+
+        const buf = readFileSync(ctc05Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasPositiveXDrillTip = model.surfaces
+            .filter(surface => surface.surfaceType === 'cone')
+            .some(surface => coneMatchesCanonical(
+                surface.params as TestConeParams,
+                {
+                    origin: { x: 55.20724295081085, y: -33.22560039632338, z: 241.3 },
+                    axis: { x: 1, y: 0, z: 0 },
+                    radius: 0,
+                    halfAngle: 59,
+                },
+            ));
+
+        expect(hasPositiveXDrillTip).toBe(true);
+    });
+
+    it('recovers representative CTC_05 large 45-degree Z-axis frusta from zero-support cylinder steps', () => {
+        if (!ctc05Path) return;
+
+        const buf = readFileSync(ctc05Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasLargeZFrustum = model.surfaces
+            .filter(surface => surface.surfaceType === 'cone')
+            .some(surface => coneMatchesCanonical(
+                surface.params as TestConeParams,
+                {
+                    origin: { x: 0, y: 0, z: 127 },
+                    axis: { x: 0, y: 0, z: -1 },
+                    radius: 146.05,
+                    halfAngle: Math.PI / 4,
+                },
+            ));
+
+        expect(hasLargeZFrustum).toBe(true);
     });
 
     it('recovers the CTC_01 59-degree drill-tip cones from raw cylinder sections', () => {
