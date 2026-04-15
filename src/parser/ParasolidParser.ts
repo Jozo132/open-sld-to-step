@@ -2764,7 +2764,7 @@ export class ParasolidParser {
                 );
                 if (axisMag < 0.5 || axisMag > 1.5) continue;
                 const radius = floats[9];
-                if (radius <= 0 || radius > 1e4) continue;
+                if (radius <= ParasolidParser.RAW_SURFACE_RADIUS_MIN || radius > 1e4) continue;
 
                 // Deduplicate by radius (rounded to avoid floating-point noise)
                 const rKey = Math.round(radius * 1e8);
@@ -2809,6 +2809,7 @@ export class ParasolidParser {
                 const axis: PsPoint = { x: floats[3], y: floats[4], z: floats[5] };
                 const radius = floats[9];
                 const semiAngle = floats[10];
+                if (radius <= ParasolidParser.RAW_SURFACE_RADIUS_MIN || radius > 1e4) continue;
 
                 const sOrigin: PsPoint = {
                     x: origin.x * PS_TO_MM,
@@ -2875,7 +2876,7 @@ export class ParasolidParser {
                 const axis: PsPoint = { x: floats[3], y: floats[4], z: floats[5] };
                 const radius = floats[9];
                 const semiAngle = floats[10];
-                if (radius <= 0 || radius > 1e4) continue;
+                if (radius <= ParasolidParser.RAW_SURFACE_RADIUS_MIN || radius > 1e4) continue;
                 const axisMag = Math.sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
                 if (axisMag < 0.5) continue;
 
@@ -3177,6 +3178,7 @@ export class ParasolidParser {
     private static readonly CYL_AXIS_TOL = 0.001;  // radians
     private static readonly CYL_ORIGIN_TOL = 0.5;   // mm — axis line distance
     private static readonly CYL_RADIUS_TOL = 0.01;  // mm
+    private static readonly RAW_SURFACE_RADIUS_MIN = ParasolidParser.CYL_RADIUS_TOL / PS_TO_MM; // m — ignore denormalized radius noise before mm conversion
     private static readonly CONE_SECTION_RADIUS_TOL = 0.1; // mm — coaxial section match
     private static readonly RAW_CONE_SEMIANGLE_MIN = 0.01; // rad — preserve 1°/2° cones, drop cylinder noise
     private static readonly VERTEX_CYL_TOL = 0.5;   // mm — vertex on cylinder

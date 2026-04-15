@@ -1826,6 +1826,34 @@ describe('ParasolidParser', () => {
         expect(cones).toHaveLength(4);
     });
 
+    it('does not keep denormalized FTC_07 tiny-radius surfaces or circles', () => {
+        if (!ftc07Path) return;
+
+        const buf = readFileSync(ftc07Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasTinySurface = model.surfaces
+            .filter(surface => surface.surfaceType === 'cylinder' || surface.surfaceType === 'cone')
+            .some(surface => {
+                const radius = (surface.params as { radius?: number }).radius;
+                return typeof radius === 'number' && radius < 0.01;
+            });
+        const hasTinyCircle = model.curves
+            .filter(curve => curve.curveType === 'circle')
+            .some(curve => {
+                const radius = (curve.params as { radius?: number }).radius;
+                return typeof radius === 'number' && radius < 0.01;
+            });
+
+        expect(hasTinySurface).toBe(false);
+        expect(hasTinyCircle).toBe(false);
+    });
+
     it('recovers the FTC_09 micro-chamfer cones from raw cylinder origins', () => {
         if (!ftc09Path) return;
 
