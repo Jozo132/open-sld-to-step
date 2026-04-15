@@ -90,6 +90,63 @@ function getRawScanStart(parser: ParasolidParser): number {
     return (parser as unknown as { resolveFullScanStart(): number }).resolveFullScanStart();
 }
 
+type TestConeParams = {
+    origin: { x: number; y: number; z: number };
+    axis: { x: number; y: number; z: number };
+    radius: number;
+    halfAngle: number;
+};
+
+function canonicalizeTestCone(params: TestConeParams): {
+    apex: { x: number; y: number; z: number };
+    axis: { x: number; y: number; z: number };
+    halfAngle: number;
+} {
+    const axisLength = Math.hypot(params.axis.x, params.axis.y, params.axis.z) || 1;
+    const axis = {
+        x: params.axis.x / axisLength,
+        y: params.axis.y / axisLength,
+        z: params.axis.z / axisLength,
+    };
+    const halfAngle = Math.abs(params.halfAngle) > Math.PI
+        ? (params.halfAngle * Math.PI / 180)
+        : params.halfAngle;
+    const tanHalfAngle = Math.tan(halfAngle);
+    const offset = !isFinite(tanHalfAngle) || Math.abs(tanHalfAngle) < 1e-9
+        ? 0
+        : params.radius / tanHalfAngle;
+
+    return {
+        apex: {
+            x: params.origin.x - axis.x * offset,
+            y: params.origin.y - axis.y * offset,
+            z: params.origin.z - axis.z * offset,
+        },
+        axis,
+        halfAngle,
+    };
+}
+
+function coneMatchesCanonical(
+    actual: TestConeParams,
+    expected: TestConeParams,
+    positionTol = 0.1,
+    angleTol = 0.02,
+): boolean {
+    const actualCanonical = canonicalizeTestCone(actual);
+    const expectedCanonical = canonicalizeTestCone(expected);
+    const axisDot =
+        actualCanonical.axis.x * expectedCanonical.axis.x +
+        actualCanonical.axis.y * expectedCanonical.axis.y +
+        actualCanonical.axis.z * expectedCanonical.axis.z;
+
+    return Math.abs(actualCanonical.apex.x - expectedCanonical.apex.x) < positionTol &&
+        Math.abs(actualCanonical.apex.y - expectedCanonical.apex.y) < positionTol &&
+        Math.abs(actualCanonical.apex.z - expectedCanonical.apex.z) < positionTol &&
+        Math.abs(Math.abs(axisDot) - 1) < 0.01 &&
+        Math.abs(actualCanonical.halfAngle - expectedCanonical.halfAngle) < angleTol;
+}
+
 // ── ParasolidParser unit tests ──────────────────────────────────────────────
 
 afterAll(() => {
@@ -1442,6 +1499,58 @@ describe('ParasolidParser', () => {
         expect(model.surfaces.filter(s => s.surfaceType === 'cone').length).toBeGreaterThanOrEqual(12);
     });
 
+    it('recovers representative CTC_04 countersink-hole chamfers from zero-support cylinder stacks', () => {
+        if (!ctc04Path) return;
+
+        const buf = readFileSync(ctc04Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasCountersinkChamfer = model.surfaces
+            .filter(surface => surface.surfaceType === 'cone')
+            .some(surface => coneMatchesCanonical(
+                surface.params as TestConeParams,
+                {
+                    origin: { x: 35, y: 760, z: 27 },
+                    axis: { x: 0, y: 0, z: 1 },
+                    radius: 7,
+                    halfAngle: Math.PI / 4,
+                },
+            ));
+
+        expect(hasCountersinkChamfer).toBe(true);
+    });
+
+    it('recovers representative CTC_04 59-degree apex cones from direct raw sections', () => {
+        if (!ctc04Path) return;
+
+        const buf = readFileSync(ctc04Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasApexCone = model.surfaces
+            .filter(surface => surface.surfaceType === 'cone')
+            .some(surface => coneMatchesCanonical(
+                surface.params as TestConeParams,
+                {
+                    origin: { x: 26.25, y: 625, z: -63.0030397327 },
+                    axis: { x: 0, y: 0, z: -1 },
+                    radius: 0,
+                    halfAngle: 1.02974425868,
+                },
+            ));
+
+        expect(hasApexCone).toBe(true);
+    });
+
     it('recovers the CTC_01 59-degree drill-tip cones from raw cylinder sections', () => {
         if (!ctc01Path) return;
 
@@ -1456,18 +1565,12 @@ describe('ParasolidParser', () => {
         const hasDrillTip = model.surfaces
             .filter(s => s.surfaceType === 'cone')
             .some(surface => {
-                const params = surface.params as {
-                    origin: { x: number; y: number; z: number };
-                    axis: { x: number; y: number; z: number };
-                    radius: number;
-                    halfAngle: number;
-                };
-                return Math.abs(params.origin.x - 30) < 0.1 &&
-                    Math.abs(params.origin.y + 80) < 0.1 &&
-                    Math.abs(params.origin.z + 25) < 0.1 &&
-                    Math.abs(params.axis.y + 1) < 0.01 &&
-                    Math.abs(params.radius - 10) < 0.1 &&
-                    Math.abs(params.halfAngle - 59) < 0.02;
+                return coneMatchesCanonical(surface.params as TestConeParams, {
+                    origin: { x: 30, y: -80, z: -25 },
+                    axis: { x: 0, y: -1, z: 0 },
+                    radius: 10,
+                    halfAngle: 59,
+                });
             });
 
         expect(hasDrillTip).toBe(true);
@@ -1519,18 +1622,12 @@ describe('ParasolidParser', () => {
 
         const hasDrillTip = cones
             .some(surface => {
-                const params = surface.params as {
-                    origin: { x: number; y: number; z: number };
-                    axis: { x: number; y: number; z: number };
-                    radius: number;
-                    halfAngle: number;
-                };
-                return Math.abs(params.origin.x - 76.2) < 0.1 &&
-                    Math.abs(params.origin.y - 72.39) < 0.1 &&
-                    Math.abs(params.origin.z + 158.75) < 0.1 &&
-                    Math.abs(params.axis.y - 1) < 0.01 &&
-                    Math.abs(params.radius - 3.175) < 0.1 &&
-                    Math.abs(params.halfAngle - 59) < 0.02;
+                return coneMatchesCanonical(surface.params as TestConeParams, {
+                    origin: { x: 76.2, y: 72.39, z: -158.75 },
+                    axis: { x: 0, y: 1, z: 0 },
+                    radius: 3.175,
+                    halfAngle: 59,
+                });
             });
 
         expect(hasDrillTip).toBe(true);
@@ -1683,35 +1780,24 @@ describe('ParasolidParser', () => {
         const representativeSurfaceIds = model.surfaces
             .filter(surface => surface.surfaceType === 'cone')
             .filter(surface => {
-                const params = surface.params as {
-                    origin: { x: number; y: number; z: number };
-                    axis: { x: number; y: number; z: number };
-                    radius: number;
-                    halfAngle: number;
-                };
+                const params = surface.params as TestConeParams;
 
-                return (
-                    Math.abs(params.origin.x - 35) < 0.1 &&
-                    Math.abs(params.origin.y - 20) < 0.1 &&
-                    Math.abs(params.origin.z + 30) < 0.1 &&
-                    Math.abs(params.axis.z - 1) < 0.01 &&
-                    Math.abs(params.radius - 5.05) < 0.1 &&
-                    Math.abs(params.halfAngle - 59) < 0.02
-                ) || (
-                    Math.abs(params.origin.x + 25) < 0.1 &&
-                    Math.abs(params.origin.y - 128) < 0.1 &&
-                    Math.abs(params.origin.z + 335) < 0.1 &&
-                    Math.abs(params.axis.z + 1) < 0.01 &&
-                    Math.abs(params.radius - 4.19) < 0.1 &&
-                    Math.abs(params.halfAngle - 59) < 0.02
-                ) || (
-                    Math.abs(params.origin.x + 240) < 0.1 &&
-                    Math.abs(params.origin.y - 288) < 0.1 &&
-                    Math.abs(params.origin.z + 185) < 0.1 &&
-                    Math.abs(params.axis.x + 1) < 0.01 &&
-                    Math.abs(params.radius - 4.19) < 0.1 &&
-                    Math.abs(params.halfAngle - 59) < 0.02
-                );
+                return coneMatchesCanonical(params, {
+                    origin: { x: 35, y: 20, z: -30 },
+                    axis: { x: 0, y: 0, z: 1 },
+                    radius: 5.05,
+                    halfAngle: 59,
+                }) || coneMatchesCanonical(params, {
+                    origin: { x: -25, y: 128, z: -335 },
+                    axis: { x: 0, y: 0, z: -1 },
+                    radius: 4.19,
+                    halfAngle: 59,
+                }) || coneMatchesCanonical(params, {
+                    origin: { x: -240, y: 288, z: -185 },
+                    axis: { x: -1, y: 0, z: 0 },
+                    radius: 4.19,
+                    halfAngle: 59,
+                });
             })
             .map(surface => surface.id);
 

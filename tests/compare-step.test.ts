@@ -1,7 +1,13 @@
 import { compareStepFiles } from '../scripts/compare-step.mjs';
 
 function buildStep(
-    conePlacements: Array<{ origin: [number, number, number]; radius: number; angle: number }>,
+    conePlacements: Array<{
+        origin: [number, number, number];
+        radius: number;
+        angle: number;
+        axis?: [number, number, number];
+        refDir?: [number, number, number];
+    }>,
     options: { degreeAngleUnit?: boolean } = {},
 ): string {
     const lines = [
@@ -18,9 +24,11 @@ function buildStep(
         const refId = nextId++;
         const placeId = nextId++;
         const coneId = nextId++;
+        const axis = placement.axis ?? [0, 1, 0];
+        const refDir = placement.refDir ?? [1, 0, 0];
         lines.push(`#${pointId}=CARTESIAN_POINT('',(${placement.origin[0]},${placement.origin[1]},${placement.origin[2]}));`);
-        lines.push(`#${axisId}=DIRECTION('',(0.,1.,0.));`);
-        lines.push(`#${refId}=DIRECTION('',(1.,0.,0.));`);
+        lines.push(`#${axisId}=DIRECTION('',(${axis[0]},${axis[1]},${axis[2]}));`);
+        lines.push(`#${refId}=DIRECTION('',(${refDir[0]},${refDir[1]},${refDir[2]}));`);
         lines.push(`#${placeId}=AXIS2_PLACEMENT_3D('',#${pointId},#${axisId},#${refId});`);
         lines.push(`#${coneId}=CONICAL_SURFACE('',#${placeId},${placement.radius},${placement.angle});`);
     }
@@ -54,6 +62,8 @@ function buildConicalFaceStep(
         radius: number;
         angle: number;
         vertices: Array<[number, number, number]>;
+        axis?: [number, number, number];
+        refDir?: [number, number, number];
     }>,
 ): string {
     const lines = [
@@ -111,11 +121,13 @@ function buildConicalFaceStep(
         const placeId = nextId++;
         const coneId = nextId++;
         const faceId = nextId++;
+        const axis = face.axis ?? [0, 1, 0];
+        const refDir = face.refDir ?? [1, 0, 0];
 
         lines.push(`#${loopId}=EDGE_LOOP('',(${orientedEdgeIds.map((id) => `#${id}`).join(',')}));`);
         lines.push(`#${boundId}=FACE_OUTER_BOUND('',#${loopId},.T.);`);
-        lines.push(`#${axisId}=DIRECTION('',(0.,1.,0.));`);
-        lines.push(`#${refId}=DIRECTION('',(1.,0.,0.));`);
+        lines.push(`#${axisId}=DIRECTION('',(${axis[0]},${axis[1]},${axis[2]}));`);
+        lines.push(`#${refId}=DIRECTION('',(${refDir[0]},${refDir[1]},${refDir[2]}));`);
         lines.push(`#${placePointId}=CARTESIAN_POINT('',(${face.origin[0]},${face.origin[1]},${face.origin[2]}));`);
         lines.push(`#${placeId}=AXIS2_PLACEMENT_3D('',#${placePointId},#${axisId},#${refId});`);
         lines.push(`#${coneId}=CONICAL_SURFACE('',#${placeId},${face.radius},${face.angle});`);
@@ -164,6 +176,21 @@ describe('compareStepFiles', () => {
         ]);
         const reference = buildStep([
             { origin: [0, 1, 0], radius: 2, angle },
+        ]);
+
+        const { scores } = compareStepFiles(generated, reference, 'generated.stp', 'reference.stp');
+
+        expect(scores.Cones).toEqual({ matched: 1, total: 1, pct: 100 });
+    });
+
+    it('matches negative-axis cones across section and apex parameterizations', () => {
+        const angle = Math.PI / 4;
+        const offset = 2 / Math.tan(angle);
+        const generated = buildStep([
+            { origin: [0, offset, 0], radius: 0, angle, axis: [0, -1, 0] },
+        ]);
+        const reference = buildStep([
+            { origin: [0, 0, 0], radius: 2, angle, axis: [0, -1, 0] },
         ]);
 
         const { scores } = compareStepFiles(generated, reference, 'generated.stp', 'reference.stp');
@@ -267,5 +294,41 @@ describe('compareStepFiles', () => {
 
         expect(scores.Faces).toEqual({ matched: 1, total: 2, pct: 50 });
         expect(output).not.toContain('Conical face matching canonicalizes equivalent faces: generated=1→1  reference=2→1');
+    });
+
+    it('matches conical faces across negative-axis section and apex parameterizations', () => {
+        const angle = Math.PI / 4;
+        const radius = 2;
+        const offset = radius / Math.tan(angle);
+        const generated = buildConicalFaceStep([
+            {
+                origin: [0, offset, 0],
+                radius: 0,
+                angle,
+                axis: [0, -1, 0],
+                vertices: [
+                    [0, offset, 0],
+                    [2, 0, 0],
+                    [0, 0, 2],
+                ],
+            },
+        ]);
+        const reference = buildConicalFaceStep([
+            {
+                origin: [0, 0, 0],
+                radius,
+                angle,
+                axis: [0, -1, 0],
+                vertices: [
+                    [0, offset, 0],
+                    [2, 0, 0],
+                    [0, 0, 2],
+                ],
+            },
+        ]);
+
+        const { scores } = compareStepFiles(generated, reference, 'generated.stp', 'reference.stp');
+
+        expect(scores.Faces).toEqual({ matched: 1, total: 1, pct: 100 });
     });
 });

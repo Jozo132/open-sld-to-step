@@ -400,19 +400,21 @@ function canonicalizeAxis(axis) {
 }
 
 function canonicalizeCone(cone) {
-    const axis = canonicalizeAxis(cone.axis);
+    const axis = [...cone.axis];
     const tanSemiAngle = Math.tan(cone.semiAngle);
     const offset = !isFinite(tanSemiAngle) || Math.abs(tanSemiAngle) < 1e-9
         ? 0
         : cone.radius / tanSemiAngle;
+    const apex = [
+        cone.origin[0] - axis[0] * offset,
+        cone.origin[1] - axis[1] * offset,
+        cone.origin[2] - axis[2] * offset,
+    ];
+
     return {
-        axis,
+        axis: canonicalizeAxis(axis),
         semiAngle: cone.semiAngle,
-        apex: [
-            cone.origin[0] - axis[0] * offset,
-            cone.origin[1] - axis[1] * offset,
-            cone.origin[2] - axis[2] * offset,
-        ],
+        apex,
     };
 }
 

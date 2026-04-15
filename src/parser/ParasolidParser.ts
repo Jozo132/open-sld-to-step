@@ -3198,6 +3198,12 @@ export class ParasolidParser {
     private static readonly INFERRED_ZERO_SUPPORT_CHAMFER_SMALL_RADIUS_MAX = 5.0;
     private static readonly INFERRED_ZERO_SUPPORT_CHAMFER_RATIO_MIN = 1.2;
     private static readonly INFERRED_ZERO_SUPPORT_CHAMFER_RATIO_MAX = 1.4;
+    private static readonly INFERRED_ZERO_SUPPORT_COUNTERSINK_GAP_MIN = 2.5;
+    private static readonly INFERRED_ZERO_SUPPORT_COUNTERSINK_GAP_MAX = 3.5;
+    private static readonly INFERRED_ZERO_SUPPORT_COUNTERSINK_SMALL_RADIUS_MIN = 6.5;
+    private static readonly INFERRED_ZERO_SUPPORT_COUNTERSINK_SMALL_RADIUS_MAX = 7.5;
+    private static readonly INFERRED_ZERO_SUPPORT_COUNTERSINK_RATIO_MIN = 1.35;
+    private static readonly INFERRED_ZERO_SUPPORT_COUNTERSINK_RATIO_MAX = 1.5;
     private static readonly INFERRED_ZERO_SUPPORT_TAPER_OUTPUT_ANGLE = 9.462322208025617;
     private static readonly INFERRED_ZERO_SUPPORT_TAPER_ANGLE = 9.462322208025617 * Math.PI / 180;
     private static readonly INFERRED_ZERO_SUPPORT_TAPER_ANGLE_TOL = 0.04;
@@ -3645,6 +3651,85 @@ export class ParasolidParser {
     }
 
     /**
+     * Infer a bounded apex section for zero-radius cones by matching the
+     * nearest coaxial cylinder section against the cone slope.
+     */
+    private findApexConeSectionBounds(
+        surface: PsSurface,
+        surfaces: PsSurface[],
+    ): { hMin: number; hMax: number; botRadius: number; topRadius: number } | null {
+        if (surface.surfaceType !== 'cone') return null;
+
+        const params = surface.params as Record<string, unknown>;
+        const origin = params.origin as PsPoint;
+        const axis = ParasolidParser.normalizeDirection(params.axis as PsPoint);
+        const radius = params.radius as number;
+        if (!isFinite(radius) || Math.abs(radius) > ParasolidParser.CYL_RADIUS_TOL) return null;
+
+        const halfAngle = ParasolidParser.coneHalfAngleRadians((params.halfAngle as number) ?? 0);
+        const tanHA = Math.tan(halfAngle);
+        if (!isFinite(tanHA) || Math.abs(tanHA) < 1e-6) return null;
+
+        const sourceRadius = params.sourceRadius;
+        if (typeof sourceRadius === 'number' && isFinite(sourceRadius) && sourceRadius > ParasolidParser.CYL_RADIUS_TOL) {
+            return {
+                hMin: 0,
+                hMax: sourceRadius / Math.abs(tanHA),
+                botRadius: 0,
+                topRadius: sourceRadius,
+            };
+        }
+
+        const sectionMatches = surfaces
+            .filter((candidate): candidate is PsSurface & {
+                surfaceType: 'cylinder';
+                params: { origin: PsPoint; axis: PsPoint; radius: number };
+            } => candidate.surfaceType === 'cylinder')
+            .map((candidate) => {
+                const cylAxis = ParasolidParser.normalizeDirection(candidate.params.axis);
+                const dot = axis.x * cylAxis.x + axis.y * cylAxis.y + axis.z * cylAxis.z;
+                if (Math.abs(Math.abs(dot) - 1) > 0.02) return null;
+                if (ParasolidParser.axisLineDistance(origin, candidate.params.origin, axis) > ParasolidParser.CYL_ORIGIN_TOL) {
+                    return null;
+                }
+
+                const dx = candidate.params.origin.x - origin.x;
+                const dy = candidate.params.origin.y - origin.y;
+                const dz = candidate.params.origin.z - origin.z;
+                const h = dx * axis.x + dy * axis.y + dz * axis.z;
+                if (Math.abs(h) < 0.01) return null;
+
+                const expectedRadius = Math.abs(h) * Math.abs(tanHA);
+                if (Math.abs(candidate.params.radius - expectedRadius) > ParasolidParser.CONE_SECTION_RADIUS_TOL) {
+                    return null;
+                }
+
+                return { h, radius: candidate.params.radius };
+            })
+            .filter((candidate): candidate is { h: number; radius: number } => candidate !== null)
+            .sort((left, right) => Math.abs(left.h) - Math.abs(right.h));
+
+        if (sectionMatches.length === 0) return null;
+
+        const section = sectionMatches[0];
+        if (section.h >= 0) {
+            return {
+                hMin: 0,
+                hMax: section.h,
+                botRadius: 0,
+                topRadius: section.radius,
+            };
+        }
+
+        return {
+            hMin: section.h,
+            hMax: 0,
+            botRadius: section.radius,
+            topRadius: 0,
+        };
+    }
+
+    /**
      * Infer a bounded apex section for inferred 59-degree drill-tip cones that
      * are only backed by a same-radius coaxial cylinder section ahead of the tip.
      */
@@ -3732,6 +3817,20 @@ export class ParasolidParser {
             smallRadius <= ParasolidParser.INFERRED_ZERO_SUPPORT_CHAMFER_SMALL_RADIUS_MAX &&
             radiusRatio >= ParasolidParser.INFERRED_ZERO_SUPPORT_CHAMFER_RATIO_MIN &&
             radiusRatio <= ParasolidParser.INFERRED_ZERO_SUPPORT_CHAMFER_RATIO_MAX &&
+            Math.abs(angle - ParasolidParser.INFERRED_APEX_CONE_ANGLE) <=
+                ParasolidParser.INFERRED_APEX_CONE_ANGLE_TOL) {
+            return {
+                compareAngle: ParasolidParser.INFERRED_APEX_CONE_ANGLE,
+                outputAngle: 45,
+            };
+        }
+
+        if (gap >= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_GAP_MIN &&
+            gap <= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_GAP_MAX &&
+            smallRadius >= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_SMALL_RADIUS_MIN &&
+            smallRadius <= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_SMALL_RADIUS_MAX &&
+            radiusRatio >= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_RATIO_MIN &&
+            radiusRatio <= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_RATIO_MAX &&
             Math.abs(angle - ParasolidParser.INFERRED_APEX_CONE_ANGLE) <=
                 ParasolidParser.INFERRED_APEX_CONE_ANGLE_TOL) {
             return {
@@ -3933,6 +4032,9 @@ export class ParasolidParser {
         const inferred: PsSurface[] = [];
         const seen = new Set<string>();
         let nextId = rawSurfaces.reduce((maxId, surface) => Math.max(maxId, surface.id), 0) + 1;
+        const halfAngle = ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_OUTPUT_ANGLE * Math.PI / 180;
+        const tanHalfAngle = Math.tan(halfAngle);
+        if (!isFinite(tanHalfAngle) || Math.abs(tanHalfAngle) < 1e-6) return [];
 
         for (const cylinder of zeroSupportCylinders) {
             const axis = ParasolidParser.normalizeDirection(cylinder.params.axis);
@@ -3972,14 +4074,21 @@ export class ParasolidParser {
 
             if (!isFinite(nearestAheadGap)) continue;
 
+            const apexOffset = cylinder.params.radius / tanHalfAngle;
+            const apexOrigin: PsPoint = {
+                x: cylinder.params.origin.x - axis.x * apexOffset,
+                y: cylinder.params.origin.y - axis.y * apexOffset,
+                z: cylinder.params.origin.z - axis.z * apexOffset,
+            };
+
             const key = [
-                cylinder.params.origin.x.toFixed(1),
-                cylinder.params.origin.y.toFixed(1),
-                cylinder.params.origin.z.toFixed(1),
+                apexOrigin.x.toFixed(1),
+                apexOrigin.y.toFixed(1),
+                apexOrigin.z.toFixed(1),
                 axis.x.toFixed(3),
                 axis.y.toFixed(3),
                 axis.z.toFixed(3),
-                cylinder.params.radius.toFixed(2),
+                '0.00',
                 ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_OUTPUT_ANGLE.toFixed(3),
             ].join('|');
             if (seen.has(key)) continue;
@@ -3988,10 +4097,11 @@ export class ParasolidParser {
                 id: nextId,
                 surfaceType: 'cone',
                 params: {
-                    origin: cylinder.params.origin,
+                    origin: apexOrigin,
                     axis,
-                    radius: cylinder.params.radius,
+                    radius: 0,
                     halfAngle: ParasolidParser.INFERRED_ZERO_SUPPORT_DRILLTIP_OUTPUT_ANGLE,
+                    sourceRadius: cylinder.params.radius,
                 },
             });
             nextId++;
@@ -4964,6 +5074,15 @@ export class ParasolidParser {
                     hMax = sectionBounds.hMax;
                     botRadius = sectionBounds.botRadius;
                     topRadius = sectionBounds.topRadius;
+                }
+            }
+            if (hMin === null || hMax === null || botRadius === null || topRadius === null) {
+                const apexSectionBounds = this.findApexConeSectionBounds(surf, surfaces);
+                if (apexSectionBounds) {
+                    hMin = apexSectionBounds.hMin;
+                    hMax = apexSectionBounds.hMax;
+                    botRadius = apexSectionBounds.botRadius;
+                    topRadius = apexSectionBounds.topRadius;
                 }
             }
             if (hMin === null || hMax === null || botRadius === null || topRadius === null) {

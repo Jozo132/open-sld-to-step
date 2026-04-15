@@ -1,7 +1,5 @@
 #!/usr/bin/env node
-/**
- * investigate129.mjs — Audit duplicate conical face signatures in STEP files.
- * Clean-room analysis of public-domain NIST test files.
+/**http://localhost:3000
  *
  * Usage:
  *   node scripts/investigate129.mjs
