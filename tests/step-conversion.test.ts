@@ -1712,6 +1712,37 @@ describe('ParasolidParser', () => {
         expect(hasFalseRingTipCone).toBe(false);
     });
 
+    it('recovers the mirrored CTC_05 Z-axis 59-degree drill-tip cones despite supported counterbore sections', () => {
+        if (!ctc05Path) return;
+
+        const buf = readFileSync(ctc05Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasMirroredZDrillTips = [
+            {
+                origin: { x: -203.2, y: 0, z: 14.3 },
+                axis: { x: 0, y: 0, z: 1 },
+                radius: 2.46,
+                halfAngle: 59,
+            },
+            {
+                origin: { x: 203.2, y: 0, z: 14.3 },
+                axis: { x: 0, y: 0, z: 1 },
+                radius: 2.46,
+                halfAngle: 59,
+            },
+        ].every((expected) => model.surfaces
+            .filter(surface => surface.surfaceType === 'cone')
+            .some(surface => coneMatchesCanonical(surface.params as TestConeParams, expected, 0.15, 0.02)));
+
+        expect(hasMirroredZDrillTips).toBe(true);
+    });
+
     it('recovers the CTC_01 59-degree drill-tip cones from raw cylinder sections', () => {
         if (!ctc01Path) return;
 

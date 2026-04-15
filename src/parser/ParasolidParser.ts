@@ -3227,6 +3227,7 @@ export class ParasolidParser {
     private static readonly INFERRED_ZERO_SUPPORT_DRILLTIP_GAP_MAX = 50;
     private static readonly INFERRED_ZERO_SUPPORT_DRILLTIP_RADIUS_MIN = 2.5;
     private static readonly INFERRED_ZERO_SUPPORT_DRILLTIP_RADIUS_MAX = 10.5;
+    private static readonly INFERRED_ZERO_SUPPORT_COMPETING_SECTION_MAX_SUPPORT = 1;
     private static readonly INFERRED_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE = 59;
     private static readonly INFERRED_HALF_RADIUS_DRILLTIP_GAP_MIN = 8;
     private static readonly INFERRED_HALF_RADIUS_DRILLTIP_GAP_MAX = 40;
@@ -3876,6 +3877,7 @@ export class ParasolidParser {
             surfaceType: 'cylinder';
             params: { origin: PsPoint; axis: PsPoint; radius: number };
         }>,
+        assoc?: Map<number, number[]>,
     ): boolean {
         const axis = ParasolidParser.normalizeDirection(cylinder.params.axis);
 
@@ -3888,6 +3890,10 @@ export class ParasolidParser {
             const otherAxis = ParasolidParser.normalizeDirection(other.params.axis);
             const dot = axis.x * otherAxis.x + axis.y * otherAxis.y + axis.z * otherAxis.z;
             if (dot < 0.98) return false;
+            const support = assoc?.get(other.id)?.length ?? 0;
+            if (support > ParasolidParser.INFERRED_ZERO_SUPPORT_COMPETING_SECTION_MAX_SUPPORT) {
+                return false;
+            }
             if (ParasolidParser.axisLineDistance(cylinder.params.origin, other.params.origin, axis) >
                 ParasolidParser.INFERRED_APEX_CONE_LINE_TOL) {
                 return false;
@@ -4302,7 +4308,7 @@ export class ParasolidParser {
             if (nearestAheadSection && this.hasOverlappingCountersinkCone(nearestAheadSection, existingCones)) {
                 continue;
             }
-            if (nearestAheadSection && this.hasCompetingLargerSectionAtOrigin(nearestAheadSection, cylinders)) {
+            if (nearestAheadSection && this.hasCompetingLargerSectionAtOrigin(nearestAheadSection, cylinders, assoc)) {
                 continue;
             }
             if (this.hasCloserOppositeDirectionPeer(cylinder, zeroSupportCylinders, nearestAheadGap)) continue;
