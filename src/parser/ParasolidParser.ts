@@ -3827,6 +3827,46 @@ export class ParasolidParser {
         });
     }
 
+    /**
+     * Reject zero-support drill-tip candidates that have a closer
+     * opposite-direction same-radius peer on the same line than the forward
+     * same-direction section used to infer the drill tip. That pattern marks a
+     * through-hole chain, not a blind-hole tip.
+     */
+    private hasCloserOppositeDirectionPeer(
+        cylinder: PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        },
+        cylinders: Array<PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        }>,
+        maxDistance: number,
+    ): boolean {
+        const axis = ParasolidParser.normalizeDirection(cylinder.params.axis);
+        return cylinders.some((other) => {
+            if (other.id === cylinder.id) return false;
+            if (Math.abs(other.params.radius - cylinder.params.radius) >= ParasolidParser.CYL_RADIUS_TOL) {
+                return false;
+            }
+            if (ParasolidParser.axisLineDistance(cylinder.params.origin, other.params.origin, axis) >
+                ParasolidParser.INFERRED_APEX_CONE_LINE_TOL) {
+                return false;
+            }
+
+            const otherAxis = ParasolidParser.normalizeDirection(other.params.axis);
+            const dot = axis.x * otherAxis.x + axis.y * otherAxis.y + axis.z * otherAxis.z;
+            if (dot >= -0.98) return false;
+
+            const dx = other.params.origin.x - cylinder.params.origin.x;
+            const dy = other.params.origin.y - cylinder.params.origin.y;
+            const dz = other.params.origin.z - cylinder.params.origin.z;
+            const distance = Math.abs(dx * axis.x + dy * axis.y + dz * axis.z);
+            return distance > 0.5 && distance <= maxDistance + 0.5;
+        });
+    }
+
     /** Normalize stored cone angles so trig always uses radians. */
     private static coneHalfAngleRadians(halfAngle: number): number {
         if (!isFinite(halfAngle)) return 0;
@@ -4130,6 +4170,7 @@ export class ParasolidParser {
             if (nearestAheadSection && this.hasOverlappingCountersinkCone(nearestAheadSection, existingCones)) {
                 continue;
             }
+            if (this.hasCloserOppositeDirectionPeer(cylinder, zeroSupportCylinders, nearestAheadGap)) continue;
 
             const apexOffset = cylinder.params.radius / tanHalfAngle;
             const apexOrigin: PsPoint = {

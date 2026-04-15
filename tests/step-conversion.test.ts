@@ -1577,6 +1577,32 @@ describe('ParasolidParser', () => {
         expect(hasArtificialTipCone).toBe(false);
     });
 
+    it('does not infer mirrored X-axis through-hole tip cones in CTC_04', () => {
+        if (!ctc04Path) return;
+
+        const buf = readFileSync(ctc04Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasMirroredThroughHoleTipCone = model.surfaces
+            .filter(surface => surface.surfaceType === 'cone')
+            .some(surface => coneMatchesCanonical(
+                surface.params as TestConeParams,
+                {
+                    origin: { x: -9.4956969048622, y: 402.5, z: -78 },
+                    axis: { x: -1, y: 0, z: 0 },
+                    radius: 0,
+                    halfAngle: 59,
+                },
+            ));
+
+        expect(hasMirroredThroughHoleTipCone).toBe(false);
+    });
+
     it('recovers the CTC_01 59-degree drill-tip cones from raw cylinder sections', () => {
         if (!ctc01Path) return;
 
