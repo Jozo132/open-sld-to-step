@@ -1202,6 +1202,103 @@ describe('ParasolidParser', () => {
         ]);
     });
 
+    it('adds one conservative unmatched shell-inline boundary target for FTC_07', () => {
+        if (!hasSamples || !ftc07Path) return;
+
+        const extraction = SldprtContainerParser.extractParasolid(readFileSync(ftc07Path));
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const points = parser.extractCoordinates();
+        const vertices = points.map((point, index) => ({
+            id: index + 1,
+            position: {
+                x: point.x * 1000,
+                y: point.y * 1000,
+                z: point.z * 1000,
+            },
+        }));
+
+        const extractedSurfaces = parser.extractSurfaces();
+        const validatedSurfaces = [];
+        for (const surface of extractedSurfaces) {
+            if (surface.surfaceType !== 'plane') {
+                validatedSurfaces.push(surface);
+                continue;
+            }
+
+            const params = surface.params as { origin: { x: number; y: number; z: number }; normal: { x: number; y: number; z: number } };
+            const coplanarVertices = [];
+            for (const vertex of vertices) {
+                const dx = vertex.position.x - params.origin.x;
+                const dy = vertex.position.y - params.origin.y;
+                const dz = vertex.position.z - params.origin.z;
+                const distance = Math.abs(dx * params.normal.x + dy * params.normal.y + dz * params.normal.z);
+                if (distance < 0.5) coplanarVertices.push(vertex.position);
+            }
+            if (coplanarVertices.length < 3) continue;
+
+            const ratio = (ParasolidParser as unknown as {
+                computeEigenvalueRatio: (pointsArg: unknown[], normalArg: unknown) => number;
+            }).computeEigenvalueRatio(coplanarVertices, params.normal);
+            if (ratio <= 2.5) validatedSurfaces.push(surface);
+        }
+
+        const inferredPlanes = (parser as unknown as {
+            inferPlanesFromVertices: (verticesArg: unknown[], surfacesArg: unknown[]) => unknown[];
+        }).inferPlanesFromVertices(
+            (ParasolidParser as unknown as { filterOutlierVertices: (verticesArg: unknown[]) => unknown[] }).filterOutlierVertices(vertices),
+            validatedSurfaces,
+        );
+        const mergedSurfaces = (ParasolidParser as unknown as {
+            recoverAxisymmetricWasherSurfaces: (surfacesArg: unknown[], verticesArg: unknown[]) => unknown[];
+        }).recoverAxisymmetricWasherSurfaces([...validatedSurfaces, ...inferredPlanes], vertices);
+        const apexCones = (parser as unknown as {
+            inferApexConesFromCylinderPairs: (surfacesArg: unknown[], verticesArg: unknown[]) => unknown[];
+        }).inferApexConesFromCylinderPairs(mergedSurfaces, vertices);
+        const directDrillTipCones = (parser as unknown as {
+            inferDrillTipConesFromRawCylinderSections: (surfacesArg: unknown[], verticesArg: unknown[], apexArg: unknown[]) => unknown[];
+        }).inferDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices, apexCones);
+        const halfRadiusDrillTipCones = (parser as unknown as {
+            inferHalfRadiusDrillTipConesFromRawCylinderSections: (surfacesArg: unknown[], verticesArg: unknown[]) => unknown[];
+        }).inferHalfRadiusDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices);
+        const repeatedCenterDrillTipCones = (parser as unknown as {
+            inferRepeatedCenterCylinderDrillTipCones: (surfacesArg: unknown[], verticesArg: unknown[], halfArg: unknown[]) => unknown[];
+        }).inferRepeatedCenterCylinderDrillTipCones(validatedSurfaces, vertices, halfRadiusDrillTipCones);
+        const surfaces = (parser as unknown as {
+            deduplicateSurfaces: (surfacesArg: unknown[]) => Array<{ id: number }>;
+        }).deduplicateSurfaces([
+            ...mergedSurfaces,
+            ...apexCones,
+            ...directDrillTipCones,
+            ...halfRadiusDrillTipCones,
+            ...repeatedCenterDrillTipCones,
+        ]);
+        surfaces.forEach((surface, index) => {
+            surface.id = index + 1;
+        });
+
+        const vertexSurfaceMap = (parser as unknown as {
+            associateVertices: (surfacesArg: unknown[], verticesArg: unknown[]) => Map<number, number[]>;
+        }).associateVertices(surfaces, vertices);
+        const hints = parser.parseRawFaceBoundaryHints();
+        const targets = (parser as unknown as {
+            planRawFaceBoundaryTargets: (
+                surfacesArg: unknown[],
+                verticesArg: unknown[],
+                vertexSurfaceMapArg: Map<number, number[]>,
+                hintsArg: unknown[],
+            ) => Map<string, { rawFaceId: number }>;
+        }).planRawFaceBoundaryTargets(surfaces, vertices, vertexSurfaceMap, hints);
+
+        const syntheticEntries = [...targets.entries()].filter(([, target]) => target.rawFaceId < 0);
+        expect(syntheticEntries).toHaveLength(1);
+        expect(syntheticEntries[0]?.[0]).toBe('cylinder:25:0');
+        expect(syntheticEntries[0]?.[1].rawFaceId).toBeLessThan(0);
+        expect(targets).toHaveProperty('size', 4);
+    });
+
     it('prefers candidates that contain the explicit raw face edge anchors', () => {
         const scoreRawFaceBoundaryCandidate = (ParasolidParser as unknown as {
             scoreRawFaceBoundaryCandidate: (hint: unknown, candidate: unknown) => { score: number } | null;
@@ -1490,6 +1587,78 @@ describe('ParasolidParser', () => {
         expect(exactScore).not.toBeNull();
         expect(nearScore).not.toBeNull();
         expect((nearScore?.score ?? Infinity)).toBeLessThan(exactScore?.score ?? -Infinity);
+    });
+
+    it('keeps small low-support planar holes but rejects large low-support ones', () => {
+        const parser = new ParasolidParser(Buffer.alloc(0));
+        const collectPlaneHoleCandidates = (parser as unknown as {
+            collectPlaneHoleCandidates: (
+                origin: { x: number; y: number; z: number },
+                normal: { x: number; y: number; z: number },
+                boundaryPts: Array<{ u: number; v: number; idx: number }>,
+                cylSurfaces: Array<{
+                    id: number;
+                    surfaceType: string;
+                    params: {
+                        origin: { x: number; y: number; z: number };
+                        axis: { x: number; y: number; z: number };
+                        radius: number;
+                    };
+                }>,
+                vertices: Array<{ id: number; position: { x: number; y: number; z: number } }>,
+                vertexSurfaceMap: Map<number, number[]>,
+            ) => Array<{ radius: number; support: number }>;
+        }).collectPlaneHoleCandidates.bind(parser);
+
+        const origin = { x: 0, y: 0, z: 0 };
+        const normal = { x: 0, y: 0, z: 1 };
+        const boundaryPts = [
+            { u: -30, v: -30, idx: 0 },
+            { u: 30, v: -30, idx: 1 },
+            { u: 30, v: 30, idx: 2 },
+            { u: -30, v: 30, idx: 3 },
+        ];
+        const cylSurfaces = [
+            {
+                id: 1,
+                surfaceType: 'cylinder',
+                params: { origin: { x: -10, y: 0, z: -1 }, axis: { x: 0, y: 0, z: 1 }, radius: 5 },
+            },
+            {
+                id: 2,
+                surfaceType: 'cylinder',
+                params: { origin: { x: 0, y: 0, z: -1 }, axis: { x: 0, y: 0, z: 1 }, radius: 9 },
+            },
+            {
+                id: 3,
+                surfaceType: 'cylinder',
+                params: { origin: { x: 10, y: 0, z: -1 }, axis: { x: 0, y: 0, z: 1 }, radius: 9 },
+            },
+        ];
+        const vertices = [
+            { id: 1, position: { x: -10, y: 0, z: -1 } },
+            { id: 2, position: { x: -10, y: 0, z: 0 } },
+            { id: 3, position: { x: -10, y: 0, z: 1 } },
+            { id: 4, position: { x: 0, y: 0, z: -1 } },
+            { id: 5, position: { x: 0, y: 0, z: 0 } },
+            { id: 6, position: { x: 0, y: 0, z: 1 } },
+            { id: 7, position: { x: 10, y: 0, z: -2 } },
+            { id: 8, position: { x: 10, y: 0, z: -1 } },
+            { id: 9, position: { x: 10, y: 0, z: 0 } },
+            { id: 10, position: { x: 10, y: 0, z: 1 } },
+        ];
+        const vertexSurfaceMap = new Map<number, number[]>([
+            [1, [0, 1, 2]],
+            [2, [3, 4, 5]],
+            [3, [6, 7, 8, 9]],
+        ]);
+
+        const candidates = collectPlaneHoleCandidates(origin, normal, boundaryPts, cylSurfaces, vertices, vertexSurfaceMap);
+        const radii = candidates.map((candidate) => candidate.radius).sort((left, right) => left - right);
+
+        expect(radii).toEqual([5, 9]);
+        expect(candidates.find((candidate) => candidate.radius === 5)?.support).toBe(3);
+        expect(candidates.find((candidate) => candidate.radius === 9)?.support).toBe(4);
     });
 
     it('reconstructs ordered type-16 component chains across NIST samples', () => {

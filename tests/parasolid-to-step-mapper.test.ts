@@ -87,13 +87,25 @@ describe('ParasolidToStepMapper.mapModel', () => {
     it('normalizes degree-like cone half-angles to radians in STEP output', () => {
         const mapper = new ParasolidToStepMapper();
         const model: PsModel = {
-            bodies: [{ id: 1, shells: [] }],
-            shells: [],
-            faces: [],
-            loops: [],
-            edges: [],
-            vertices: [{ id: 1, position: { x: 0, y: 0, z: 0 } }],
-            curves: [],
+            bodies: [{ id: 1, shells: [1] }],
+            shells: [{ id: 1, faces: [1], closed: false }],
+            faces: [{ id: 1, surface: 1, outerLoop: 1, innerLoops: [], sense: true }],
+            loops: [{ id: 1, edges: [1, 2, 3], senses: [true, true, true] }],
+            edges: [
+                { id: 1, startVertex: 1, endVertex: 2, curve: 1, sense: true },
+                { id: 2, startVertex: 2, endVertex: 3, curve: 2, sense: true },
+                { id: 3, startVertex: 3, endVertex: 1, curve: 3, sense: true },
+            ],
+            vertices: [
+                { id: 1, position: { x: 0, y: 0, z: 0 } },
+                { id: 2, position: { x: 1, y: 0, z: 0 } },
+                { id: 3, position: { x: 0, y: 1, z: 0 } },
+            ],
+            curves: [
+                { id: 1, curveType: 'line', params: { start: { x: 0, y: 0, z: 0 }, end: { x: 1, y: 0, z: 0 } } },
+                { id: 2, curveType: 'line', params: { start: { x: 1, y: 0, z: 0 }, end: { x: 0, y: 1, z: 0 } } },
+                { id: 3, curveType: 'line', params: { start: { x: 0, y: 1, z: 0 }, end: { x: 0, y: 0, z: 0 } } },
+            ],
             surfaces: [{
                 id: 1,
                 surfaceType: 'cone',

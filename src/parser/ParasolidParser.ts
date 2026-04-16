@@ -1111,6 +1111,69 @@ export class ParasolidParser {
             }));
     }
 
+    /** Build conservative shell-inline boundary hints from grouped short anchor records. */
+    private buildSyntheticShellInlineBoundaryHints(): PsRawFaceBoundaryHint[] {
+        const anchorRecords = this.parseShellInlineFaceAnchorRecords();
+        if (anchorRecords.length === 0) return [];
+
+        const edgePositions = this.buildEdgeChainPositionMap();
+        const groups = new Map<string, {
+            shellId: number;
+            inlineId: number;
+            edgeAnchorIds: Set<number>;
+            coedgeAnchorIds: Set<number>;
+        }>();
+
+        for (const record of anchorRecords) {
+            const key = `${record.shellId}:${record.inlineId}`;
+            const group = groups.get(key) ?? {
+                shellId: record.shellId,
+                inlineId: record.inlineId,
+                edgeAnchorIds: new Set<number>(),
+                coedgeAnchorIds: new Set<number>(),
+            };
+            group.edgeAnchorIds.add(record.edgeAnchorId);
+            group.coedgeAnchorIds.add(record.coedgeAnchorId);
+            groups.set(key, group);
+        }
+
+        return [...groups.values()]
+            .map((group) => {
+                const orderedEdgePositions = [...group.edgeAnchorIds]
+                    .map((edgeId) => edgePositions.get(edgeId))
+                    .filter((position): position is {
+                        chainIndex: number;
+                        componentIndex: number;
+                        edgeIndex: number;
+                        linearIndex: number;
+                    } => position !== undefined)
+                    .map((position) => ({
+                        chainIndex: position.chainIndex,
+                        linearIndex: position.linearIndex,
+                    }))
+                    .sort((left, right) => {
+                        return left.chainIndex - right.chainIndex || left.linearIndex - right.linearIndex;
+                    });
+                const spread = ParasolidParser.buildBoundarySpreadMetrics(orderedEdgePositions);
+
+                return {
+                    faceId: -(group.shellId * 1000 + group.inlineId),
+                    primarySize: group.edgeAnchorIds.size,
+                    collapsedSize: spread.segmentCount >= 3 ? spread.segmentCount : null,
+                    edgeAnchorCount: group.edgeAnchorIds.size,
+                    edgeAnchorIds: [...group.edgeAnchorIds].sort((left, right) => left - right),
+                    coedgeAnchorIds: [...group.coedgeAnchorIds].sort((left, right) => left - right),
+                    repeatedEdgeIds: [],
+                    resolvedSurfaceType: null,
+                    chainCount: spread.chainCount,
+                    segmentCount: spread.segmentCount,
+                    maxSegmentLength: spread.maxSegmentLength,
+                    maxChainSpan: spread.maxChainSpan,
+                };
+            })
+            .filter((hint) => hint.primarySize >= 3);
+    }
+
     /** Decode aligned edge-id hits embedded in raw face payloads. */
     parseFaceEdgeHits(): PsFaceEdgeHit[] {
         const edgeIds = new Set(this.parseEdgeRecords().map((record) => record.id));
@@ -2060,6 +2123,8 @@ export class ParasolidParser {
 
             const cylVtxIndices = vertexSurfaceMap.get(cyl.id) ?? [];
             if (cylVtxIndices.length === 0) continue;
+            if (cylRadius >= ParasolidParser.PLANE_HOLE_LARGE_RADIUS_MIN
+                && cylVtxIndices.length < ParasolidParser.PLANE_HOLE_MIN_SUPPORT) continue;
 
             let minAlong = Infinity;
             let maxAlong = -Infinity;
@@ -2150,6 +2215,73 @@ export class ParasolidParser {
         for (const plan of plans) {
             const selected = plan.options.find((option) => !option.candidate.matched);
             if (!selected) continue;
+
+            selected.candidate.matched = true;
+            targets.set(selected.candidate.key, {
+                rawFaceId: plan.hint.faceId,
+                outerSize: selected.match.outerSize,
+                totalSize: selected.match.totalSize,
+            });
+        }
+
+        const shellPlans = this.buildSyntheticShellInlineBoundaryHints()
+            .map((hint) => {
+                const options = candidates
+                    .map((candidate) => {
+                        const match = ParasolidParser.scoreRawFaceBoundaryCandidate(hint, candidate);
+                        if (!match) return null;
+
+                        const edgeMatches = hint.edgeAnchorIds.filter((edgeId) => candidate.mappedEdgeIds.includes(edgeId)).length;
+                        const coedgeMatches = hint.coedgeAnchorIds.filter((coedgeId) => candidate.mappedCoedgeIds.includes(coedgeId)).length;
+
+                        return {
+                            candidate,
+                            match,
+                            edgeMatches,
+                            coedgeMatches,
+                        };
+                    })
+                    .filter((entry): entry is {
+                        candidate: BoundaryBudgetCandidate;
+                        match: BoundaryBudgetMatchOption;
+                        edgeMatches: number;
+                        coedgeMatches: number;
+                    } => entry !== null)
+                    .sort((left, right) => {
+                        return left.match.score - right.match.score
+                            || left.candidate.totalSize - right.candidate.totalSize
+                            || left.candidate.outerSize - right.candidate.outerSize
+                            || left.candidate.key.localeCompare(right.candidate.key);
+                    });
+
+                return { hint, options };
+            })
+            .filter((plan) => {
+                if (plan.options.length === 0) return false;
+
+                const best = plan.options[0];
+                const second = plan.options[1] ?? null;
+                const hasUniqueWinner = second === null || best.match.score < second.match.score;
+                const hasAnchorSupport = best.edgeMatches > 0 || best.coedgeMatches > 0;
+
+                return !best.candidate.matched && hasUniqueWinner && hasAnchorSupport;
+            })
+            .sort((left, right) => {
+                const leftBest = left.options[0];
+                const rightBest = right.options[0];
+                const leftSupport = leftBest.edgeMatches + leftBest.coedgeMatches;
+                const rightSupport = rightBest.edgeMatches + rightBest.coedgeMatches;
+
+                return left.options.length - right.options.length
+                    || rightSupport - leftSupport
+                    || leftBest.match.score - rightBest.match.score
+                    || right.hint.primarySize - left.hint.primarySize
+                    || right.hint.faceId - left.hint.faceId;
+            });
+
+        for (const plan of shellPlans) {
+            const selected = plan.options[0];
+            if (selected.candidate.matched) continue;
 
             selected.candidate.matched = true;
             targets.set(selected.candidate.key, {
@@ -3409,6 +3541,8 @@ export class ParasolidParser {
     private static readonly RAW_CONE_SEMIANGLE_MIN = 0.01; // rad — preserve 1°/2° cones, drop cylinder noise
     private static readonly VERTEX_CYL_TOL = 0.5;   // mm — vertex on cylinder
     private static readonly VERTEX_TORUS_TOL = 0.5; // mm — vertex on torus tube
+    private static readonly PLANE_HOLE_LARGE_RADIUS_MIN = 8; // mm — large planar holes need more support to avoid false positives
+    private static readonly PLANE_HOLE_MIN_SUPPORT = 4; // vertices — preserve small holes but reject weak large-radius candidates
     // Cone recovery from coaxial cylinder section transitions.
     // The primary path still targets the well-supported CTC_04-style 45°
     // chamfers using vertex-backed section endpoints. A narrower origin-only
