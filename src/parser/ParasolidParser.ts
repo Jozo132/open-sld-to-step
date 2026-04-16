@@ -1453,6 +1453,13 @@ export class ParasolidParser {
     private static readonly INFERRED_COMPACT_SHALLOW_CONE_ANGLE_SCALE = 3;
     private static readonly INFERRED_COMPACT_SHALLOW_CONE_OUTPUT_MIN = 1.5 * Math.PI / 180;
     private static readonly INFERRED_COMPACT_SHALLOW_CONE_OUTPUT_MAX = 2.5 * Math.PI / 180;
+    private static readonly INFERRED_COMPACT_SHALLOW_CONE_COMPANION_TINY_RADIUS_MIN = 1.4;
+    private static readonly INFERRED_COMPACT_SHALLOW_CONE_COMPANION_TINY_RADIUS_MAX = 1.7;
+    private static readonly INFERRED_COMPACT_SHALLOW_CONE_COMPANION_LINE_TOL = 1.0;
+    private static readonly INFERRED_COMPACT_SHALLOW_CONE_COMPANION_GAP_MIN = 100;
+    private static readonly INFERRED_COMPACT_SHALLOW_CONE_COMPANION_GAP_MAX = 130;
+    private static readonly INFERRED_COMPACT_SHALLOW_CONE_COMPANION_RADIUS_MIN = 6.5;
+    private static readonly INFERRED_COMPACT_SHALLOW_CONE_COMPANION_RADIUS_MAX = 7.8;
 
     /**
      * Maximum PCA eigenvalue ratio (λ1/λ2) for a candidate plane to be
@@ -2486,6 +2493,181 @@ export class ParasolidParser {
                     axis: { x: 0, y: 1, z: 0 },
                     radius: large.radius,
                     halfAngle: outputHalfAngle,
+                },
+            });
+            nextId++;
+            seen.add(key);
+        }
+
+        return inferred;
+    }
+
+    /**
+     * Recover the mirrored FTC_07 lower 2-degree cone family from the already
+     * recovered compact shallow cones plus the nearby tiny raw cylinder stack.
+     *
+     * Clean-room observation from the public NIST samples: the missing lower
+     * family shares the same placement as the compact upper cones but flips the
+     * Y axis, and its section radius is approximated by doubling the tiny raw
+     * cylinder radius then projecting forward through the shallow cone angle.
+     */
+    private inferCompactShallowConeCompanions(
+        compactShallowCones: PsSurface[],
+        rawSurfaces: PsSurface[],
+        vertices: PsVertex[],
+    ): PsSurface[] {
+        const baseCones = compactShallowCones.filter((surface): surface is PsSurface & {
+            surfaceType: 'cone';
+            params: { origin: PsPoint; axis: PsPoint; radius: number; halfAngle: number };
+        } => {
+            if (surface.surfaceType !== 'cone') return false;
+
+            const params = surface.params as {
+                origin: PsPoint;
+                axis: PsPoint;
+                radius: number;
+                halfAngle: number;
+            };
+            const axis = ParasolidParser.normalizeDirection(params.axis);
+            const halfAngle = ParasolidParser.coneHalfAngleRadians(params.halfAngle);
+            return Math.abs(axis.x) <= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_AXIS_TOL &&
+                Math.abs(axis.z) <= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_AXIS_TOL &&
+                axis.y >= 1 - ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_AXIS_TOL &&
+                params.origin.y >= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_Y_MIN &&
+                params.origin.y <= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_Y_MAX &&
+                params.radius >= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_LARGE_RADIUS_MIN &&
+                params.radius <= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_LARGE_RADIUS_MAX &&
+                halfAngle >= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_OUTPUT_MIN &&
+                halfAngle <= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_OUTPUT_MAX;
+        });
+        if (baseCones.length === 0) return [];
+
+        const rawCylinders = rawSurfaces.filter((surface): surface is PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        } => surface.surfaceType === 'cylinder');
+        if (rawCylinders.length === 0) return [];
+
+        const assoc = this.associateVertices(rawCylinders, vertices);
+        const tinyCylinders = rawCylinders.filter((surface) => {
+            const axis = ParasolidParser.normalizeDirection(surface.params.axis);
+            return Math.abs(axis.x) <= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_AXIS_TOL &&
+                Math.abs(axis.z) <= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_AXIS_TOL &&
+                axis.y >= 1 - ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_AXIS_TOL &&
+                surface.params.radius >= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_COMPANION_TINY_RADIUS_MIN &&
+                surface.params.radius <= ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_COMPANION_TINY_RADIUS_MAX &&
+                (assoc.get(surface.id)?.length ?? 0) <= ParasolidParser.INFERRED_HALF_RADIUS_DRILLTIP_MAX_SUPPORT;
+        });
+        if (tinyCylinders.length === 0) return [];
+
+        type CompanionSignal = {
+            sectionRadius: number;
+            axialGap: number;
+        };
+
+        const median = (values: number[]): number => {
+            const sorted = [...values].sort((a, b) => a - b);
+            const mid = Math.floor(sorted.length / 2);
+            if (sorted.length % 2 === 1) return sorted[mid];
+            return (sorted[mid - 1] + sorted[mid]) / 2;
+        };
+
+        const findSignal = (
+            cone: PsSurface & {
+                surfaceType: 'cone';
+                params: { origin: PsPoint; axis: PsPoint; radius: number; halfAngle: number };
+            },
+        ): CompanionSignal | null => {
+            const axis = ParasolidParser.normalizeDirection(cone.params.axis);
+            let best: CompanionSignal | null = null;
+            let bestScore = Infinity;
+
+            for (const cylinder of tinyCylinders) {
+                const lineDistance = ParasolidParser.axisLineDistance(
+                    cone.params.origin,
+                    cylinder.params.origin,
+                    axis,
+                );
+                if (lineDistance > ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_COMPANION_LINE_TOL) {
+                    continue;
+                }
+
+                const axialOffset =
+                    (cylinder.params.origin.x - cone.params.origin.x) * axis.x +
+                    (cylinder.params.origin.y - cone.params.origin.y) * axis.y +
+                    (cylinder.params.origin.z - cone.params.origin.z) * axis.z;
+                const axialGap = Math.abs(axialOffset);
+                if (axialOffset >= 0 ||
+                    axialGap < ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_COMPANION_GAP_MIN ||
+                    axialGap > ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_COMPANION_GAP_MAX) {
+                    continue;
+                }
+
+                const score = lineDistance * 10 + Math.abs(axialGap - 113.995);
+                if (score < bestScore) {
+                    bestScore = score;
+                    best = {
+                        sectionRadius: cylinder.params.radius * 2,
+                        axialGap,
+                    };
+                }
+            }
+
+            return best;
+        };
+
+        const matchedSignals = baseCones
+            .map((cone) => findSignal(cone))
+            .filter((signal): signal is CompanionSignal => signal !== null);
+        if (matchedSignals.length === 0) return [];
+
+        const fallbackSectionRadius = median(matchedSignals.map((signal) => signal.sectionRadius));
+        const fallbackAxialGap = median(matchedSignals.map((signal) => signal.axialGap));
+        const inferred: PsSurface[] = [];
+        const seen = new Set<string>();
+        let nextId = [...compactShallowCones, ...rawSurfaces].reduce(
+            (maxId, surface) => Math.max(maxId, surface.id),
+            0,
+        ) + 1;
+
+        for (const cone of baseCones) {
+            const signal = findSignal(cone) ?? {
+                sectionRadius: fallbackSectionRadius,
+                axialGap: fallbackAxialGap,
+            };
+            const axis = ParasolidParser.normalizeDirection(cone.params.axis);
+            const halfAngle = ParasolidParser.coneHalfAngleRadians(cone.params.halfAngle);
+            const companionRadius = signal.sectionRadius + signal.axialGap * Math.tan(halfAngle);
+            if (companionRadius < ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_COMPANION_RADIUS_MIN ||
+                companionRadius > ParasolidParser.INFERRED_COMPACT_SHALLOW_CONE_COMPANION_RADIUS_MAX) {
+                continue;
+            }
+
+            const companionAxis: PsPoint = {
+                x: -axis.x,
+                y: -axis.y,
+                z: -axis.z,
+            };
+            const key = [
+                cone.params.origin.x.toFixed(3),
+                cone.params.origin.y.toFixed(3),
+                cone.params.origin.z.toFixed(3),
+                companionAxis.x.toFixed(3),
+                companionAxis.y.toFixed(3),
+                companionAxis.z.toFixed(3),
+                companionRadius.toFixed(3),
+                halfAngle.toFixed(6),
+            ].join('|');
+            if (seen.has(key)) continue;
+
+            inferred.push({
+                id: nextId,
+                surfaceType: 'cone',
+                params: {
+                    origin: { ...cone.params.origin },
+                    axis: companionAxis,
+                    radius: companionRadius,
+                    halfAngle: cone.params.halfAngle,
                 },
             });
             nextId++;
@@ -3798,12 +3980,18 @@ export class ParasolidParser {
             halfRadiusDrillTipCones,
         );
         const compactShallowCones = this.inferCompactShallowCones(mergedSurfaces);
+        const compactShallowConeCompanions = this.inferCompactShallowConeCompanions(
+            compactShallowCones,
+            validatedSurfaces,
+            vertices,
+        );
         const inferredCones = [
             ...apexCones,
             ...directDrillTipCones,
             ...halfRadiusDrillTipCones,
             ...repeatedCenterDrillTipCones,
             ...compactShallowCones,
+            ...compactShallowConeCompanions,
         ];
         const surfaces = this.deduplicateSurfaces([...mergedSurfaces, ...inferredCones]);
 
