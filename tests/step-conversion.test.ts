@@ -2370,6 +2370,38 @@ describe('ParasolidParser', () => {
         expect(cones).toHaveLength(4);
     });
 
+    it('recovers representative FTC_07 shallow 2-degree compact cones', () => {
+        if (!ftc07Path) return;
+
+        const buf = readFileSync(ftc07Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+        const shallowAngle = 2 * Math.PI / 180;
+
+        const hasRepresentativeCones = [
+            {
+                origin: { x: 139.192, y: 11.379, z: -71.633 },
+                axis: { x: 0, y: 1, z: 0 },
+                radius: 11.882523,
+                halfAngle: shallowAngle,
+            },
+            {
+                origin: { x: -139.192, y: 11.379, z: 71.633 },
+                axis: { x: 0, y: 1, z: 0 },
+                radius: 11.882523,
+                halfAngle: shallowAngle,
+            },
+        ].every((expected) => model.surfaces
+            .filter(surface => surface.surfaceType === 'cone')
+            .some(surface => coneMatchesCanonical(surface.params as TestConeParams, expected, 1.0, 0.02)));
+
+        expect(hasRepresentativeCones).toBe(true);
+    });
+
     it('does not keep denormalized FTC_07 tiny-radius surfaces or circles', () => {
         if (!ftc07Path) return;
 
