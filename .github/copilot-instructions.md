@@ -13,7 +13,7 @@ A **clean-room** Node.js / TypeScript library that:
 2. **Clean-room only.** See `LEGAL.md` for the full legal notice. All parsing is based on [MS-CFB], ISO 10303, public Parasolid schema references, and observable byte-level structure of public-domain NIST test files.
 3. **Investigation scripts** go into `./scripts/investigate#.mjs` where `#` is the next serial number (currently 1–72 exist). These are disposable `.mjs` files for binary exploration — run with `node scripts/investigate#.mjs`.
 4. **Memory budget.** The default npm test path prefers Bun when available and falls back to Jest. Keep the Jest fallback at `--max-old-space-size=1024`, with `maxWorkers: 1` and `workerIdleMemoryLimit: '256MB'`. Do not cache large buffers across test suites — use `afterAll()` to clear caches.
-5. **Windows host.** The dev machine is Windows. Use `npm test`/`npm run test:integration` for the preferred Bun-or-Jest path, or `./node_modules/jest/bin/jest.js` for the explicit Jest fallback (not `node_modules/.bin/jest` which is a bash shim).
+5. **Windows host.** The dev machine is Windows. Use `npm test`, `npm run test:watch`, or `npm run test:integration` for the Bun-first test path. Do not add npm scripts that expose Jest directly; keep it as the internal fallback behind `scripts/run-tests.mjs`.
 
 ## Project Layout
 
@@ -53,7 +53,7 @@ output/                             # Generated STEP files (not in git)
 |---------|---------|
 | `npm test` | Run all tests, preferring Bun and falling back to Jest |
 | `npm run test:bun` | Run all tests explicitly with Bun |
-| `npm run test:jest` | Run all tests explicitly with Jest |
+| `npm run test:watch` | Run tests in watch mode with Bun first, then Jest only if Bun is unavailable |
 | `npm run test:integration` | Run only `brep-extraction.test.ts` with the preferred runner |
 | `npm run build` | TypeScript → `dist/` |
 | `npm run lint` | Type-check without emit |

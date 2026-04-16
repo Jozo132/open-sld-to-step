@@ -51,6 +51,7 @@
  *  - Based on public Parasolid schema documentation and clean-room analysis.
  */
 
+import { Buffer } from 'node:buffer';
 import type {
     PsModel,
     PsBody,
@@ -63,555 +64,130 @@ import type {
     PsSurface,
     PsPoint,
 } from '../step/ParasolidToStepMapper.js';
-
-// ── Header parsing ────────────────────────────────────────────────────────────
-
-/** Parsed header of a Parasolid transmit file. */
-export interface PsTransmitHeader {
-    /** Modeller version that created the file (e.g. 3000269). */
-    modellerVersion: number;
-    /** Full schema identifier (e.g. "SCH_3000269_30000_13006"). */
-    schemaId: string;
-}
-
-/** Census of entity types found in a Parasolid binary transmit stream. */
-export interface PsEntityCensus {
-    sentinels: number;
-    points: number;
-    coedges: number;
-    edges: number;
-    faces: number;
-    surfaces: number;
-    shells: number;
-    loops: number;
-    other: number;
-}
-
-/** Parsed field-layout token from the schema block. */
-export interface PsSchemaFieldDefinition {
-    /** Byte offset where the type-code token starts. */
-    offset: number;
-    /** First byte after the encoded field name. */
-    endOffset: number;
-    /** Compact type-code sequence such as "CId" or "RA". */
-    typeCodes: string;
-    /** Printable field-name token that follows the type-code sequence. */
-    name: string;
-}
-
-/** Parsed named class definition from the post-schema metadata catalogue. */
-export interface PsNamedClassDefinition {
-    /** Byte offset where the class name starts. */
-    offset: number;
-    /** First byte after the fixed-width class metadata trailer. */
-    endOffset: number;
-    /** Printable class name, e.g. BODY_MATCH or SDL/TYSA_COLOUR. */
-    name: string;
-    /** Observed class marker following the NUL terminator. */
-    classType: 'P' | 'O' | 'Q';
-    /** Raw flag byte observed after the class-type marker. */
-    flags: number;
-    /** Additional uint16 metadata preserved verbatim for clean-room analysis. */
-    extra: number;
-    /** Observed field-count or arity byte. */
-    count: number;
-    /** Parent/class-link identifier from the class metadata block. */
-    parentId: number;
-    /** First field-definition index referenced by this class. */
-    fieldStart: number;
-    /** Last field-definition index referenced by this class. */
-    fieldEnd: number;
-}
-
-/** Parsed metadata envelope around the schema and named class catalogue. */
-export interface PsSchemaMetadata {
-    /** Full schema identifier (e.g. SCH_3000269_30000_13006). */
-    schemaId: string;
-    /** Offset of the SCH_ identifier. */
-    schemaOffset: number;
-    /** First byte after the printable schema identifier. */
-    schemaTerminatorOffset: number;
-    /** Best-effort end of the schema/class metadata area. */
-    metadataEndOffset: number;
-    /** First detected pre-sentinel entity header, if present. */
-    firstEntityOffset: number | null;
-    /** Decoded first pre-sentinel entity header, if present. */
-    firstEntityHeader: PsLinearEntityHeader | null;
-    /** First sentinel offset, if a sentinel zone exists. */
-    firstSentinelOffset: number | null;
-    /** Parsed field-layout tokens from the schema block. */
-    fieldDefinitions: PsSchemaFieldDefinition[];
-    /** Parsed named class definitions from the class catalogue. */
-    namedClasses: PsNamedClassDefinition[];
-}
-
-/** Decoded linear entity header before the sentinel-block zone. */
-export interface PsLinearEntityHeader {
-    /** Byte offset where the header starts. */
-    offset: number;
-    /** Observed header encoding variant. */
-    format: 'compact' | 'packed';
-    /** Raw entity type byte from the header. */
-    type: number;
-    /** Raw entity id extracted from the header. */
-    id: number;
-    /** Raw flags uint16 extracted from the header. */
-    flags: number;
-    /** Header trailer uint16 for packed records; null for compact records. */
-    trailer: number | null;
-}
-
-/** Decoded record anchored to a sentinel occurrence in the linear entity zone. */
-export interface PsSentinelAlignedEntity {
-    /** Byte offset of the 8-byte sentinel instance. */
-    sentinelOffset: number;
-    /** Whether the sentinel terminates the record or appears as embedded data. */
-    role: 'terminator' | 'embedded-data';
-    /** Decoded linear entity header associated with this sentinel. */
-    header: PsLinearEntityHeader;
-    /** Best-effort small uint16 references associated with this record. */
-    refs: number[];
-}
-
-/** Decoded compact type-18 record from the sentinel-aligned topology chain. */
-export interface PsCoedgeRecord {
-    /** Byte offset of the terminating sentinel. */
-    sentinelOffset: number;
-    /** Raw coedge entity id. */
-    id: number;
-    /** Raw flags field. */
-    flags: number;
-    /** First reference, currently observed as a curve/edge-like link. */
-    curveLikeId: number;
-    /** Previous coedge in the global doubly-linked chain. */
-    prevCoedgeId: number;
-    /** Next coedge in the global doubly-linked chain. */
-    nextCoedgeId: number;
-    /** Vertex/point-like reference carried by the coedge. */
-    vertexPointId: number;
-}
-
-/** Ordered global coedge chain recovered from compact type-18 records. */
-export interface PsCoedgeChain {
-    /** Coedge id whose previous link leaves the decoded coedge set. */
-    headCoedgeId: number;
-    /** Coedge id whose next link leaves the decoded coedge set. */
-    tailCoedgeId: number;
-    /** External/non-coedge predecessor referenced by the head coedge. */
-    terminalPrevId: number;
-    /** External/non-coedge successor referenced by the tail coedge. */
-    terminalNextId: number;
-    /** Coedges in linked-list order from head to tail. */
-    orderedCoedges: PsCoedgeRecord[];
-}
-
-/** Decoded compact type-16 record whose sentinel starts the payload area. */
-export interface PsEdgeRecord {
-    /** Byte offset of the embedded sentinel. */
-    sentinelOffset: number;
-    /** Raw edge entity id. */
-    id: number;
-    /** Raw flags field. */
-    flags: number;
-    /** First observed payload reference; semantics still unresolved. */
-    firstRefId: number;
-    /** Previous edge-like link in the observed type-16 graph. */
-    prevEdgeId: number;
-    /** Next edge-like link in the observed type-16 graph. */
-    nextEdgeId: number;
-    /** Geometry-like reference that often resolves to type-30 records. */
-    geometryLikeId: number;
-    /** Trailing payload ref; observed as a stable small terminal value. */
-    trailingRefAId: number;
-    /** Trailing payload ref; observed as a stable small terminal value. */
-    trailingRefBId: number;
-}
-
-/** Ordered type-16 component recovered from prev/next links. */
-export interface PsEdgeComponent {
-    /** Edge id whose previous link leaves the decoded type-16 set. */
-    headEdgeId: number;
-    /** Edge id whose next link leaves the decoded type-16 set. */
-    tailEdgeId: number;
-    /** External/non-type-16 predecessor referenced by the component head. */
-    terminalPrevId: number;
-    /** External/non-type-16 successor referenced by the component tail. */
-    terminalNextId: number;
-    /** Type-16 records in linked order from head to tail. */
-    orderedEdges: PsEdgeRecord[];
-}
-
-/** Ordered chain of type-16 components linked by external anchor ids. */
-export interface PsEdgeComponentChain {
-    /** Head edge id of the first component in the chain. */
-    headEdgeId: number;
-    /** Tail edge id of the last component in the chain. */
-    tailEdgeId: number;
-    /** External predecessor anchor for the first component. */
-    terminalPrevId: number;
-    /** External successor anchor for the last component. */
-    terminalNextId: number;
-    /** Components in observed linked order. */
-    orderedComponents: PsEdgeComponent[];
-}
-
-/** Structural POINT record decoded from the point entity stream. */
-export interface PsPointRecord {
-    /** Byte offset where the point record starts. */
-    offset: number;
-    /** Whether the point came from a sentinel block or packed pre-sentinel zone. */
-    format: 'sentinel' | 'packed';
-    /** Raw point entity id. */
-    id: number;
-    /** Raw flags/reference word preserved from the record header. */
-    flags: number;
-    /** Next coedge-like reference carried by the point record. */
-    nextCoedgeId: number;
-    /** Next point in the linked point chain. */
-    nextPointId: number;
-    /** Previous point in the linked point chain. */
-    prevPointId: number;
-    /** Best-effort float64 triplet preserved from the point payload. */
-    position: PsPoint;
-}
-
-/** Minimal raw face record decoded from sentinel-block sub-records. */
-export interface PsFaceRecord {
-    /** Byte offset of the underlying raw face entity. */
-    offset: number;
-    /** Whether the face was the primary entity of its sentinel block. */
-    primary: boolean;
-    /** Raw face entity id. */
-    id: number;
-    /** Raw face flags word from the prefix. */
-    flags: number;
-    /** First linked ref in the stable face prefix. */
-    primaryRefId: number;
-    /** Geometry-like ref in the stable face prefix. */
-    geometryLikeId: number;
-    /** Second linked ref in the stable face prefix. */
-    secondaryRefId: number;
-    /** Embedded shell id when the [00 11][id][00 01] marker is present. */
-    shellId: number | null;
-    /** Optional coedge anchor observed at byte offset 24 in many face payloads. */
-    coedgeAnchorAId: number | null;
-    /** Optional edge anchor observed at byte offset 28 in many face payloads. */
-    edgeAnchorAId: number | null;
-    /** Optional coedge anchor observed at byte offset 70 in many face payloads. */
-    coedgeAnchorBId: number | null;
-    /** Optional edge anchor observed at byte offset 74 in many face payloads. */
-    edgeAnchorBId: number | null;
-    /** Total raw payload size after the type/id header. */
-    dataLength: number;
-}
-
-/** Stable 30-69 byte window recovered from longer raw FACE payloads. */
-export interface PsFaceInlineWindowRecord {
-    /** Raw face entity id that owns the inline window. */
-    faceId: number;
-    /** Embedded shell id when the [00 11][id][00 01] marker is present. */
-    shellId: number | null;
-    /** Number of uint16 words preserved from the 30-69 byte window. */
-    wordLength: number;
-    /** Raw uint16 words from bytes 30-69 inclusive. */
-    words: number[];
-    /** Marker word at bytes 34-35, commonly 0x2B00 or 0x2D00. */
-    markerWord: number;
-    /** Inline tag-like word at bytes 36-37, commonly 0x11xx or 0x0Fxx. */
-    inlineTagWord: number;
-    /** Whether the tail word at bytes 64-65 repeats the owning face id. */
-    hasSelfFaceTail: boolean;
-    /** Whether the tail word at bytes 68-69 repeats the embedded shell id. */
-    hasSelfShellTail: boolean;
-}
-
-/** Inline type-0x11 container link recovered from a shell/body payload segment. */
-export interface PsShellInlineContainerLink {
-    /** Raw type-0x11 entity that owns the inline segment. */
-    shellId: number;
-    /** Zero-based segment index within the owning shell payload. */
-    segmentIndex: number;
-    /** Linked type-0x11 container id carried by the inline segment. */
-    linkedContainerId: number;
-}
-
-/** Summary graph derived from inline type-0x11 container-link segments. */
-export interface PsShellInlineContainerGraph {
-    /** Extracted type-0x11 container ids present in the current stream. */
-    nodeIds: number[];
-    /** Containers with no incoming inline links from other extracted type-0x11 nodes. */
-    rootIds: number[];
-    /** Links whose targets resolve to another extracted type-0x11 container. */
-    internalLinks: PsShellInlineContainerLink[];
-    /** Links whose targets do not resolve to an extracted type-0x11 container. */
-    externalLinks: PsShellInlineContainerLink[];
-}
-
-/** Inline face-like record recovered from a non-link type-0x11 payload segment. */
-export interface PsShellInlineFaceRecord {
-    /** Raw type-0x11 entity that owns the inline segment. */
-    shellId: number;
-    /** Zero-based segment index within the owning shell payload. */
-    segmentIndex: number;
-    /** Observed one-byte local face-like id from the segment header. */
-    inlineId: number;
-    /** Total uint16 words in the recovered segment. */
-    wordLength: number;
-    /** Remaining uint16 words after the inline face-like header word. */
-    refs: number[];
-}
-
-/** Stable short inline face-like record with global coedge and edge anchors. */
-export interface PsShellInlineFaceAnchorRecord {
-    /** Raw type-0x11 entity that owns the inline segment. */
-    shellId: number;
-    /** Zero-based segment index within the owning shell payload. */
-    segmentIndex: number;
-    /** Observed one-byte local face-like id from the segment header. */
-    inlineId: number;
-    /** First opaque uint16 ref in the stable short record family. */
-    refAId: number;
-    /** Second opaque uint16 ref in the stable short record family. */
-    refBId: number;
-    /** Stable global coedge anchor at refs[2] for the short record family. */
-    coedgeAnchorId: number;
-    /** Third opaque uint16 ref in the stable short record family. */
-    refCId: number;
-    /** Stable global edge anchor at refs[4] for the short record family. */
-    edgeAnchorId: number;
-}
-
-/** Aligned edge id occurrence found inside a raw face payload. */
-export interface PsFaceEdgeHit {
-    /** Raw face entity id that owns the payload hit. */
-    faceId: number;
-    /** Byte offset within the face payload where the edge id was found. */
-    byteOffset: number;
-    /** Edge id referenced by the face payload. */
-    edgeId: number;
-    /** Ordered edge chain index when the edge participates in a decoded chain. */
-    chainIndex: number | null;
-    /** Ordered component index within the decoded chain. */
-    componentIndex: number | null;
-    /** Edge index within its ordered component. */
-    edgeIndex: number | null;
-    /** Flattened edge position across the ordered chain. */
-    linearIndex: number | null;
-}
-
-export interface PsRawFaceBoundaryHint {
-    faceId: number;
-    primarySize: number;
-    collapsedSize: number | null;
-    edgeAnchorCount: number;
-    edgeAnchorIds: number[];
-    coedgeAnchorIds: number[];
-    repeatedEdgeIds: number[];
-    resolvedSurfaceType: string | null;
-    chainCount: number;
-    segmentCount: number;
-    maxSegmentLength: number;
-    maxChainSpan: number | null;
-}
-
-interface BoundaryBudgetCandidate {
-    key: string;
-    surfaceType: string;
-    outerSize: number;
-    totalSize: number;
-    holeCount: number;
-    mappedEdgeCount: number;
-    mappedEdgeIds: number[];
-    mappedCoedgeIds: number[];
-    chainCount: number;
-    segmentCount: number;
-    maxSegmentLength: number;
-    maxChainSpan: number | null;
-    matched: boolean;
-}
-
-interface BoundaryBudgetTarget {
-    rawFaceId: number;
-    outerSize?: number;
-    totalSize?: number;
-}
-
-interface BoundaryBudgetMatchOption {
-    score: number;
-    outerSize?: number;
-    totalSize?: number;
-}
-
-interface PointEdgeChainPosition {
-    coedgeId: number;
-    edgeId: number | null;
-    chainIndex: number | null;
-    linearIndex: number | null;
-}
-
-/** Dominant compact type-30/type-31 record with four leading refs and a geometry marker. */
-export interface PsCompactGeometryRecord {
-    /** Byte offset where the compact header starts. */
-    offset: number;
-    /** Raw record type byte (0x1E or 0x1F). */
-    type: number;
-    /** Raw geometry entity id. */
-    id: number;
-    /** Raw flags field. */
-    flags: number;
-    /** Four observed uint16 refs that precede the geometry marker. */
-    refIds: [number, number, number, number];
-    /** Marker byte that begins the float payload, usually 0x2B. */
-    markerByte: number;
-}
-
-/** Dominant compact record family keyed by four refs plus a geometry marker. */
-export interface PsCompactGeometryLikeRecord extends PsCompactGeometryRecord {}
-
-/** Packed FF-format geometry-like record with four refs and a marker at offset 19. */
-export interface PsPackedGeometryLikeRecord {
-    /** Byte offset where the packed header starts. */
-    offset: number;
-    /** Raw record type byte (currently observed: 0x1E, 0x1F, 0x20). */
-    type: number;
-    /** Raw geometry-like entity id. */
-    id: number;
-    /** Raw flags field. */
-    flags: number;
-    /** Packed-header trailer field. */
-    trailer: number;
-    /** Four observed uint16 refs that precede the geometry marker. */
-    refIds: [number, number, number, number];
-    /** Marker byte that begins the float payload, usually 0x2B or 0x2D. */
-    markerByte: number;
-}
-
-/** Alias view used when an edge points at refIds[1] of a unique geometry-like record. */
-export interface PsGeometryLikeAliasRecord {
-    /** Byte offset of the canonical geometry-like record. */
-    offset: number;
-    /** Raw record type byte from the canonical geometry-like record. */
-    type: number;
-    /** Alias id carried by the referencing edge. */
-    id: number;
-    /** Canonical geometry-like record id that owns the decoded payload. */
-    canonicalId: number;
-    /** Raw flags field copied from the canonical geometry-like record. */
-    flags: number;
-    /** Packed trailer if the canonical record is FF-format; null for compact records. */
-    trailer: number | null;
-    /** Four observed uint16 refs from the canonical geometry-like record. */
-    refIds: [number, number, number, number];
-    /** Marker byte that begins the float payload. */
-    markerByte: number;
-}
-
-type PsDirectGeometryLikeRecord = PsCompactGeometryLikeRecord | PsPackedGeometryLikeRecord;
-
-/** Decoded type-29 point record found in the post-sentinel gap. */
-export interface PsGapPointRecord {
-    /** Byte offset of the preceding sentinel. */
-    sentinelOffset: number;
-    /** Byte offset of the 0x0003 gap separator. */
-    separatorOffset: number;
-    /** Raw point entity id. */
-    id: number;
-    /** Raw flags field. */
-    flags: number;
-    /** Next coedge-like reference carried by the point record. */
-    nextCoedgeId: number;
-    /** Next point in the linked point chain. */
-    nextPointId: number;
-    /** Previous point in the linked point chain. */
-    prevPointId: number;
-    /** Best-effort float64 triplet preserved from the trailing payload. */
-    position: PsPoint;
-}
-
-/** Marker bytes at the start of every entity record of type A. */
-const RECORD_MARKER_P = 0x70; // '=p'
-/** Marker bytes at the start of every entity record of type B. */
-const RECORD_MARKER_Q = 0x71; // '=q'
-/** The '=' byte preceding record markers. */
-const RECORD_PREFIX = 0x3d; // '='
-
-/**
- * 6-byte sentinel that separates entity record blocks in the Parasolid
- * binary transmit format. Observed consistently across all NIST SolidWorks
- * MBD 2018 test files (both marker and markerless variants).
- */
-const SENTINEL = Buffer.from([0xc2, 0xbc, 0x92, 0x8f, 0x99, 0x6e]);
-const SENTINEL_8 = Buffer.from([0xc2, 0xbc, 0x92, 0x8f, 0x99, 0x6e, 0x00, 0x00]);
-
-/** Known entity type codes (2nd byte of the 00 XX type marker). */
-const ENTITY_POINT = 0x1d;     // POINT — contains 3×float64 BE coordinates
-const ENTITY_COEDGE = 0x12;    // COEDGE — doubly-linked list references
-const ENTITY_EDGE = 0x10;      // EDGE — connects two vertices via a curve
-const ENTITY_FACE = 0x0f;      // FACE — bounded surface with loops
-const ENTITY_SURFACE = 0x1e;   // SURFACE/CURVE — geometry with float64 params
-const ENTITY_BSPLINE = 0x1f;   // B-SPLINE curve/surface
-const ENTITY_GEOM_AUX = 0x26;  // Auxiliary compact geometry-like record with structured payload
-const ENTITY_GEOM_CHAIN = 0x86; // Observed FTC_07 compact geometry-like chain variant
-const ENTITY_SHELL = 0x11;     // BODY/REGION/SHELL container
-const ENTITY_LOOP = 0x13;      // LOOP — ordered set of coedges
-const ENTITY_ATTRIB = 0x20;    // ATTRIB/TRANSFORM — additional surface geometry
-
-/** Observed one-byte type codes used inside the compact schema field block. */
-const SCHEMA_FIELD_TYPE_BYTES = new Set<number>([
-    0x41, // A
-    0x43, // C
-    0x44, // D
-    0x46, // F
-    0x49, // I
-    0x4a, // J
-    0x51, // Q
-    0x52, // R
-    0x64, // d
-]);
-
-/** Named class records use a single marker byte after the NUL terminator. */
-const NAMED_CLASS_TYPE_BYTES = new Map<number, 'P' | 'O' | 'Q'>([
-    [0x50, 'P'],
-    [0x4f, 'O'],
-    [0x51, 'Q'],
-]);
-
-/**
- * Bytes from the type marker (00 1D) to the start of coordinate data
- * in a POINT entity record.
- *
- * Layout: [00 1D] [id:2] [00 00] [ref:2] [00 01] [ref:2] [ref:2] [ref:2] → 16 bytes
- */
-const POINT_COORD_OFFSET = 16;
-
-/**
- * 6-byte sub-record separator found within sentinel blocks.
- * Splits concatenated entity records inside a single sentinel block.
- * Pattern: [00 01 00 01 00 03] — observed in all 11 NIST files.
- * Geometry entities (0x1E, 0x1F) are always sub-records, never primary block entities.
- */
-const SUB_RECORD_SEP = Buffer.from([0x00, 0x01, 0x00, 0x01, 0x00, 0x03]);
-
-/**
- * Parasolid stores coordinates in meters; STEP declares MILLIMETRE as the
- * length unit.  All positional coordinates and radii are scaled by this
- * factor during parse().
- */
-const PS_TO_MM = 1000;
-
-/** Parsed sub-record entity within a sentinel block. */
-interface RawEntity {
-    /** Entity type code (e.g. 0x1E for surface/curve). */
-    type: number;
-    /** Entity ID (uint16 BE). */
-    id: number;
-    /** Byte offset where the raw entity header begins. */
-    offset: number;
-    /** Whether the entity was the primary record within its sentinel block. */
-    primary: boolean;
-    /** Raw data bytes after the type+id header. */
-    data: Buffer;
-}
+import type {
+    BoundaryBudgetCandidate,
+    BoundaryBudgetMatchOption,
+    BoundaryBudgetTarget,
+    PointEdgeChainPosition,
+    RawEntity,
+    PsCoedgeChain,
+    PsCoedgeRecord,
+    PsCompactGeometryLikeRecord,
+    PsCompactGeometryRecord,
+    PsDirectGeometryLikeRecord,
+    PsEdgeComponent,
+    PsEdgeComponentChain,
+    PsEdgeRecord,
+    PsEntityCensus,
+    PsFaceEdgeHit,
+    PsFaceInlineWindowRecord,
+    PsFaceRecord,
+    PsGapPointRecord,
+    PsGeometryLikeAliasRecord,
+    PsLinearEntityHeader,
+    PsNamedClassDefinition,
+    PsPackedGeometryLikeRecord,
+    PsPointRecord,
+    PsRawFaceBoundaryHint,
+    PsSchemaFieldDefinition,
+    PsSchemaMetadata,
+    PsSentinelAlignedEntity,
+    PsShellInlineContainerGraph,
+    PsShellInlineContainerLink,
+    PsShellInlineFaceAnchorRecord,
+    PsShellInlineFaceRecord,
+    PsTransmitHeader,
+} from './ParasolidParserTypes.js';
+import {
+    buildBoundaryBudgetKey as buildBoundaryBudgetKeyImpl,
+    buildBoundarySpreadMetrics as buildBoundarySpreadMetricsImpl,
+    buildPointCoordKey as buildPointCoordKeyImpl,
+    clusterPoints2D as clusterPoints2DImpl,
+    computeEigenvalueRatio as computeEigenvalueRatioImpl,
+    convexHull2D as convexHull2DImpl,
+    filterOutlierVertices as filterOutlierVerticesImpl,
+    isPointInConvexHull as isPointInConvexHullImpl,
+    isPointInPolygon as isPointInPolygonImpl,
+    planeBasis as planeBasisImpl,
+} from './ParasolidParserUtils.js';
+import {
+    computeBoundaryAnchorPenalty as computeBoundaryAnchorPenaltyImpl,
+    computeBoundaryCoedgePenalty as computeBoundaryCoedgePenaltyImpl,
+    computeBoundaryCoveragePenalty as computeBoundaryCoveragePenaltyImpl,
+    computeBoundaryRepeatedHitPenalty as computeBoundaryRepeatedHitPenaltyImpl,
+    computeBoundarySpreadPenalty as computeBoundarySpreadPenaltyImpl,
+    countBoundaryAnchorMatches as countBoundaryAnchorMatchesImpl,
+    countBoundaryCoedgeMatches as countBoundaryCoedgeMatchesImpl,
+    scoreRawFaceBoundaryCandidate as scoreRawFaceBoundaryCandidateImpl,
+} from './ParasolidBoundaryMatching.js';
+import {
+    ENTITY_BSPLINE,
+    ENTITY_FACE,
+    ENTITY_SURFACE,
+    PS_TO_MM,
+} from './ParasolidParserConstants.js';
+import {
+    buildBoundaryCandidateSpread as buildBoundaryCandidateSpreadImpl,
+    buildEdgeChainPositionMap as buildEdgeChainPositionMapImpl,
+    buildPointEdgeChainPositionsByCoord as buildPointEdgeChainPositionsByCoordImpl,
+    buildRawFaceBoundaryHints as buildRawFaceBoundaryHintsImpl,
+    buildSyntheticShellInlineBoundaryHints as buildSyntheticShellInlineBoundaryHintsImpl,
+    countEntityRecords as countEntityRecordsImpl,
+    extractAllEntities as extractAllEntitiesImpl,
+    extractCoordinates as extractCoordinatesImpl,
+    findEntityClasses as findEntityClassesImpl,
+    getEntityCensus as getEntityCensusImpl,
+    parseAllGeometryLikeRecords as parseAllGeometryLikeRecordsImpl,
+    parseCoedgeChain as parseCoedgeChainImpl,
+    parseCoedgeRecords as parseCoedgeRecordsImpl,
+    parseCompactGeometryLikeRecords as parseCompactGeometryLikeRecordsImpl,
+    parseCompactGeometryRecords as parseCompactGeometryRecordsImpl,
+    parseEdgeComponentChains as parseEdgeComponentChainsImpl,
+    parseEdgeComponents as parseEdgeComponentsImpl,
+    parseEdgeRecords as parseEdgeRecordsImpl,
+    parseFaceEdgeHits as parseFaceEdgeHitsImpl,
+    parseFaceInlineWindowRecords as parseFaceInlineWindowRecordsImpl,
+    parseFaceRecords as parseFaceRecordsImpl,
+    parseGapPointRecords as parseGapPointRecordsImpl,
+    parseGeometryLikeAliasRecords as parseGeometryLikeAliasRecordsImpl,
+    parseHeader as parseHeaderImpl,
+    parsePackedGeometryLikeRecords as parsePackedGeometryLikeRecordsImpl,
+    parsePointRecords as parsePointRecordsImpl,
+    parseSchemaMetadata as parseSchemaMetadataImpl,
+    parseSentinelAlignedEntities as parseSentinelAlignedEntitiesImpl,
+    parseShellInlineContainerGraph as parseShellInlineContainerGraphImpl,
+    parseShellInlineContainerLinks as parseShellInlineContainerLinksImpl,
+    parseShellInlineFaceAnchorRecords as parseShellInlineFaceAnchorRecordsImpl,
+    parseShellInlineFaceRecords as parseShellInlineFaceRecordsImpl,
+} from './ParasolidStructuralParsers.js';
+export type {
+    PsTransmitHeader,
+    PsEntityCensus,
+    PsSchemaFieldDefinition,
+    PsNamedClassDefinition,
+    PsSchemaMetadata,
+    PsLinearEntityHeader,
+    PsSentinelAlignedEntity,
+    PsCoedgeRecord,
+    PsCoedgeChain,
+    PsEdgeRecord,
+    PsEdgeComponent,
+    PsEdgeComponentChain,
+    PsPointRecord,
+    PsFaceRecord,
+    PsFaceInlineWindowRecord,
+    PsShellInlineContainerLink,
+    PsShellInlineContainerGraph,
+    PsShellInlineFaceRecord,
+    PsShellInlineFaceAnchorRecord,
+    PsFaceEdgeHit,
+    PsRawFaceBoundaryHint,
+    PsCompactGeometryRecord,
+    PsCompactGeometryLikeRecord,
+    PsPackedGeometryLikeRecord,
+    PsGeometryLikeAliasRecord,
+    PsGapPointRecord,
+} from './ParasolidParserTypes.js';
 
 // ── Parser class ──────────────────────────────────────────────────────────────
 
@@ -624,40 +200,9 @@ interface RawEntity {
  */
 export class ParasolidParser {
     private readonly buf: Buffer;
-    private pos = 0;
 
     constructor(buf: Buffer) {
         this.buf = buf;
-    }
-
-    /** Iterate type-0x11 payload segments split by the observed uint16 0x0001 separator. @internal */
-    private forEachShellPayloadSegment(
-        visitor: (entity: RawEntity, segmentIndex: number, words: number[]) => void,
-    ): void {
-        for (const entity of this.extractAllEntities()) {
-            if (entity.type !== ENTITY_SHELL || entity.data.length < 4) continue;
-
-            let segmentIndex = 0;
-            let currentWords: number[] = [];
-
-            for (let offset = 0; offset + 2 <= entity.data.length; offset += 2) {
-                const word = entity.data.readUInt16BE(offset);
-                if (word === 1) {
-                    if (currentWords.length > 0) {
-                        visitor(entity, segmentIndex, currentWords);
-                        segmentIndex++;
-                    }
-                    currentWords = [];
-                    continue;
-                }
-
-                currentWords.push(word);
-            }
-
-            if (currentWords.length > 0) {
-                visitor(entity, segmentIndex, currentWords);
-            }
-        }
     }
 
     /**
@@ -665,37 +210,7 @@ export class ParasolidParser {
      * Returns null if the buffer does not look like a Parasolid transmit file.
      */
     parseHeader(): PsTransmitHeader | null {
-        const buf = this.buf;
-        // Must start with 'PS'
-        if (buf.length < 20 || buf[0] !== 0x50 || buf[1] !== 0x53) return null;
-
-        // Find "TRANSMIT" marker
-        const transmitIdx = buf.indexOf('TRANSMIT', 0, 'ascii');
-        if (transmitIdx < 0 || transmitIdx > 32) return null;
-
-        // Extract modeller version from "modeller version NNNNNNN"
-        const versionMarker = buf.indexOf('version ', 0, 'ascii');
-        let modellerVersion = 0;
-        if (versionMarker >= 0 && versionMarker < 128) {
-            // Read ASCII digits after "version "
-            let numStr = '';
-            for (let i = versionMarker + 8; i < buf.length && i < versionMarker + 20; i++) {
-                if (buf[i] >= 0x30 && buf[i] <= 0x39) numStr += String.fromCharCode(buf[i]);
-                else break;
-            }
-            modellerVersion = parseInt(numStr, 10) || 0;
-        }
-
-        // Find schema ID (SCH_...)
-        const schIdx = buf.indexOf('SCH_', 0, 'ascii');
-        let schemaId = '';
-        if (schIdx >= 0 && schIdx < 256) {
-            let end = schIdx;
-            while (end < buf.length && buf[end] >= 0x20 && buf[end] <= 0x7e) end++;
-            schemaId = buf.subarray(schIdx, end).toString('ascii');
-        }
-
-        return { modellerVersion, schemaId };
+        return parseHeaderImpl(this.buf);
     }
 
     /**
@@ -707,70 +222,7 @@ export class ParasolidParser {
      * proprietary SDK knowledge.
      */
     parseSchemaMetadata(): PsSchemaMetadata | null {
-        const buf = this.buf;
-        const schIdx = buf.indexOf('SCH_', 0, 'ascii');
-        if (schIdx < 0) return null;
-
-        let schemaTerminatorOffset = schIdx;
-        while (schemaTerminatorOffset < buf.length) {
-            const byte = buf[schemaTerminatorOffset];
-            if (byte === 0x00 || byte === 0x0a || byte === 0x0d) break;
-            if (byte < 0x20 || byte > 0x7e) break;
-            schemaTerminatorOffset++;
-        }
-
-        const schemaId = buf.subarray(schIdx, schemaTerminatorOffset).toString('ascii');
-        const firstSentinelOffset = buf.indexOf(SENTINEL);
-        const schemaRegionEnd = firstSentinelOffset >= 0
-            ? firstSentinelOffset
-            : Math.min(buf.length, schemaTerminatorOffset + 4096);
-
-        const fieldDefinitions = this.parseSchemaFieldDefinitions(
-            schemaTerminatorOffset + 1,
-            Math.min(schemaRegionEnd, schemaTerminatorOffset + 2048),
-        );
-        const namedClasses = this.parseNamedClassDefinitions(
-            schemaTerminatorOffset + 1,
-            schemaRegionEnd,
-        );
-
-        let metadataEndOffset = schemaTerminatorOffset + 1;
-        for (const fieldDefinition of fieldDefinitions) {
-            if (fieldDefinition.endOffset > metadataEndOffset) {
-                metadataEndOffset = fieldDefinition.endOffset;
-            }
-        }
-        for (const namedClass of namedClasses) {
-            if (namedClass.endOffset > metadataEndOffset) {
-                metadataEndOffset = namedClass.endOffset;
-            }
-        }
-        const trailingSchemaTerminator = this.findLastSchemaTerminator(
-            metadataEndOffset,
-            Math.min(schemaRegionEnd, metadataEndOffset + 64),
-        );
-        if (trailingSchemaTerminator >= 0) {
-            metadataEndOffset = trailingSchemaTerminator + 1;
-        }
-
-        const firstEntityHeader = this.findFirstLinearEntityHeader(
-            metadataEndOffset,
-            schemaRegionEnd,
-            firstSentinelOffset >= 0 ? firstSentinelOffset : null,
-        );
-        const firstEntityOffset = firstEntityHeader?.offset ?? null;
-
-        return {
-            schemaId,
-            schemaOffset: schIdx,
-            schemaTerminatorOffset,
-            metadataEndOffset,
-            firstEntityOffset,
-            firstEntityHeader,
-            firstSentinelOffset: firstSentinelOffset >= 0 ? firstSentinelOffset : null,
-            fieldDefinitions,
-            namedClasses,
-        };
+        return parseSchemaMetadataImpl(this.buf);
     }
 
     /**
@@ -780,27 +232,7 @@ export class ParasolidParser {
      * recognisable by their name strings followed by type-marker bytes.
      */
     findEntityClasses(): string[] {
-        const buf = this.buf;
-        const classes = new Set<string>();
-        const metadata = this.parseSchemaMetadata();
-        for (const namedClass of metadata?.namedClasses ?? []) {
-            classes.add(namedClass.name);
-        }
-
-        // Known Parasolid topology class names to look for
-        const knownNames = [
-            'BODY', 'REGION', 'LUMP', 'SHELL', 'FACE', 'LOOP', 'FIN',
-            'EDGE', 'VERTEX', 'POINT', 'CURVE', 'SURFACE',
-            'PLANE', 'CYLINDER', 'CONE', 'SPHERE', 'TORUS',
-            'LINE', 'CIRCLE', 'ELLIPSE', 'BCURVE', 'BSURF',
-            'BODY_MATCH', 'ATTRIB',
-        ];
-
-        for (const name of knownNames) {
-            const idx = buf.indexOf(name, 0, 'ascii');
-            if (idx >= 0) classes.add(name);
-        }
-        return [...classes];
+        return findEntityClassesImpl(this.buf);
     }
 
     /**
@@ -809,16 +241,7 @@ export class ParasolidParser {
      * Each entity is prefixed by `=p` (0x3D 0x70) or `=q` (0x3D 0x71).
      */
     countEntityRecords(): { pRecords: number; qRecords: number } {
-        const buf = this.buf;
-        let pRecords = 0;
-        let qRecords = 0;
-        for (let i = 0; i < buf.length - 1; i++) {
-            if (buf[i] === RECORD_PREFIX) {
-                if (buf[i + 1] === RECORD_MARKER_P) pRecords++;
-                else if (buf[i + 1] === RECORD_MARKER_Q) qRecords++;
-            }
-        }
-        return { pRecords, qRecords };
+        return countEntityRecordsImpl(this.buf);
     }
 
     /**
@@ -829,380 +252,62 @@ export class ParasolidParser {
      * - packed/FF record: header + sentinel + optional small refs
      */
     parseSentinelAlignedEntities(): PsSentinelAlignedEntity[] {
-        const entities: PsSentinelAlignedEntity[] = [];
-
-        for (const sentinelOffset of this.findEightByteSentinelOffsets()) {
-            const compactOffset = sentinelOffset - 18;
-            if (compactOffset >= 0) {
-                const header = this.parseLinearEntityHeader(compactOffset, sentinelOffset);
-                if (header?.format === 'compact') {
-                    entities.push({
-                        sentinelOffset,
-                        role: 'terminator',
-                        header,
-                        refs: [
-                            this.buf.readUInt16BE(compactOffset + 10),
-                            this.buf.readUInt16BE(compactOffset + 12),
-                            this.buf.readUInt16BE(compactOffset + 14),
-                            this.buf.readUInt16BE(compactOffset + 16),
-                        ],
-                    });
-                }
-            }
-
-            const packedOffset = sentinelOffset - 11;
-            if (packedOffset >= 0) {
-                const header = this.parseLinearEntityHeader(packedOffset, sentinelOffset);
-                if (header?.format === 'packed') {
-                    entities.push({
-                        sentinelOffset,
-                        role: 'embedded-data',
-                        header,
-                        refs: this.readPackedPostSentinelRefs(sentinelOffset),
-                    });
-                }
-            }
-        }
-
-        return entities;
+        return parseSentinelAlignedEntitiesImpl(this.buf);
     }
 
     /** Decode compact type-18 records from the sentinel-aligned record pass. */
     parseCoedgeRecords(): PsCoedgeRecord[] {
-        return this.parseSentinelAlignedEntities()
-            .filter((entity) => entity.role === 'terminator' && entity.header.type === 18 && entity.refs.length >= 4)
-            .map((entity) => ({
-                sentinelOffset: entity.sentinelOffset,
-                id: entity.header.id,
-                flags: entity.header.flags,
-                curveLikeId: entity.refs[0],
-                prevCoedgeId: entity.refs[1],
-                nextCoedgeId: entity.refs[2],
-                vertexPointId: entity.refs[3],
-            }));
+        return parseCoedgeRecordsImpl(this.buf);
     }
 
     /** Recover the single ordered coedge chain when the links form one path. */
     parseCoedgeChain(): PsCoedgeChain | null {
-        const coedges = this.parseCoedgeRecords();
-        if (coedges.length === 0) return null;
-
-        const coedgeIds = new Set(coedges.map((record) => record.id));
-        const coedgeById = new Map(coedges.map((record) => [record.id, record]));
-        const heads = coedges.filter((record) => !coedgeIds.has(record.prevCoedgeId));
-        const tails = coedges.filter((record) => !coedgeIds.has(record.nextCoedgeId));
-        if (heads.length !== 1 || tails.length !== 1) return null;
-
-        const orderedCoedges: PsCoedgeRecord[] = [];
-        const seen = new Set<number>();
-        let current: PsCoedgeRecord | undefined = heads[0];
-
-        while (current && !seen.has(current.id)) {
-            orderedCoedges.push(current);
-            seen.add(current.id);
-            current = coedgeById.get(current.nextCoedgeId);
-        }
-
-        if (orderedCoedges.length !== coedges.length) return null;
-        const tail = orderedCoedges[orderedCoedges.length - 1];
-        if (tail.id !== tails[0].id) return null;
-
-        return {
-            headCoedgeId: heads[0].id,
-            tailCoedgeId: tail.id,
-            terminalPrevId: heads[0].prevCoedgeId,
-            terminalNextId: tail.nextCoedgeId,
-            orderedCoedges,
-        };
+        return parseCoedgeChainImpl(this.buf);
     }
 
     /** Decode compact type-16 records whose sentinel starts the payload area. */
     parseEdgeRecords(): PsEdgeRecord[] {
-        const records: PsEdgeRecord[] = [];
-
-        for (const sentinelOffset of this.findEightByteSentinelOffsets()) {
-            const headerOffset = sentinelOffset - 10;
-            if (headerOffset < 0) continue;
-
-            const header = this.parseLinearEntityHeader(headerOffset, sentinelOffset);
-            if (!header || header.format !== 'compact' || header.type !== ENTITY_EDGE) continue;
-
-            const refsStart = sentinelOffset + SENTINEL_8.length;
-            const refsEnd = refsStart + 12;
-            if (refsEnd > this.buf.length) continue;
-
-            records.push({
-                sentinelOffset,
-                id: header.id,
-                flags: header.flags,
-                firstRefId: this.buf.readUInt16BE(refsStart),
-                prevEdgeId: this.buf.readUInt16BE(refsStart + 2),
-                nextEdgeId: this.buf.readUInt16BE(refsStart + 4),
-                geometryLikeId: this.buf.readUInt16BE(refsStart + 6),
-                trailingRefAId: this.buf.readUInt16BE(refsStart + 8),
-                trailingRefBId: this.buf.readUInt16BE(refsStart + 10),
-            });
-        }
-
-        return records;
+        return parseEdgeRecordsImpl(this.buf);
     }
 
     /** Decode minimal raw face records from sentinel-block sub-record entities. */
     parseFaceRecords(): PsFaceRecord[] {
-        const coedgeIds = new Set(this.parseCoedgeRecords().map((record) => record.id));
-        const edgeIds = new Set(this.parseEdgeRecords().map((record) => record.id));
-
-        return this.extractAllEntities()
-            .filter((entity) => entity.type === ENTITY_FACE && entity.data.length >= 12)
-            .map((entity) => {
-                const shellId = entity.data.length >= 18 &&
-                    entity.data.readUInt16BE(12) === ENTITY_SHELL &&
-                    entity.data.readUInt16BE(16) === 1
-                    ? entity.data.readUInt16BE(14)
-                    : null;
-                const coedgeAnchorAId = entity.data.length >= 26
-                    ? entity.data.readUInt16BE(24)
-                    : 0;
-                const edgeAnchorAId = entity.data.length >= 30
-                    ? entity.data.readUInt16BE(28)
-                    : 0;
-                const coedgeAnchorBId = entity.data.length >= 72
-                    ? entity.data.readUInt16BE(70)
-                    : 0;
-                const edgeAnchorBId = entity.data.length >= 76
-                    ? entity.data.readUInt16BE(74)
-                    : 0;
-
-                return {
-                    offset: entity.offset,
-                    primary: entity.primary,
-                    id: entity.id,
-                    flags: entity.data.readUInt16BE(2),
-                    primaryRefId: entity.data.readUInt16BE(6),
-                    geometryLikeId: entity.data.readUInt16BE(8),
-                    secondaryRefId: entity.data.readUInt16BE(10),
-                    shellId,
-                    coedgeAnchorAId: coedgeIds.has(coedgeAnchorAId) ? coedgeAnchorAId : null,
-                    edgeAnchorAId: edgeIds.has(edgeAnchorAId) ? edgeAnchorAId : null,
-                    coedgeAnchorBId: coedgeIds.has(coedgeAnchorBId) ? coedgeAnchorBId : null,
-                    edgeAnchorBId: edgeIds.has(edgeAnchorBId) ? edgeAnchorBId : null,
-                    dataLength: entity.data.length,
-                };
-            });
+        return parseFaceRecordsImpl(this.buf);
     }
 
     /** Decode the stable 30-69 byte window carried by longer raw FACE payloads. */
     parseFaceInlineWindowRecords(): PsFaceInlineWindowRecord[] {
-        return this.extractAllEntities()
-            .filter((entity) => entity.type === ENTITY_FACE && entity.data.length >= 70)
-            .map((entity) => {
-                const shellId = entity.data.length >= 18
-                    && entity.data.readUInt16BE(12) === ENTITY_SHELL
-                    && entity.data.readUInt16BE(16) === 1
-                    ? entity.data.readUInt16BE(14)
-                    : null;
-                const words: number[] = [];
-                for (let byteOffset = 30; byteOffset < 70; byteOffset += 2) {
-                    words.push(entity.data.readUInt16BE(byteOffset));
-                }
-
-                return {
-                    faceId: entity.id,
-                    shellId,
-                    wordLength: words.length,
-                    words,
-                    markerWord: words[2],
-                    inlineTagWord: words[3],
-                    hasSelfFaceTail: words[17] === entity.id,
-                    hasSelfShellTail: shellId !== null && words[19] === shellId,
-                };
-            });
+        return parseFaceInlineWindowRecordsImpl(this.buf);
     }
 
     /** Decode inline type-0x11 container links embedded inside shell/body payload segments. */
     parseShellInlineContainerLinks(): PsShellInlineContainerLink[] {
-        const links: PsShellInlineContainerLink[] = [];
-
-        this.forEachShellPayloadSegment((entity, segmentIndex, words) => {
-            if (words.length === 2 && words[0] === ENTITY_SHELL) {
-                links.push({
-                    shellId: entity.id,
-                    segmentIndex,
-                    linkedContainerId: words[1],
-                });
-            }
-        });
-
-        return links;
+        return parseShellInlineContainerLinksImpl(this.buf);
     }
 
     /** Summarize the graph induced by inline type-0x11 container-link segments. */
     parseShellInlineContainerGraph(): PsShellInlineContainerGraph {
-        const nodeIds = this.extractAllEntities()
-            .filter((entity) => entity.type === ENTITY_SHELL)
-            .map((entity) => entity.id)
-            .sort((left, right) => left - right);
-        const nodeIdSet = new Set(nodeIds);
-        const internalLinks: PsShellInlineContainerLink[] = [];
-        const externalLinks: PsShellInlineContainerLink[] = [];
-
-        for (const link of this.parseShellInlineContainerLinks()) {
-            if (nodeIdSet.has(link.linkedContainerId)) internalLinks.push(link);
-            else externalLinks.push(link);
-        }
-
-        const incomingInternalTargets = new Set(internalLinks.map((link) => link.linkedContainerId));
-        const rootIds = nodeIds.filter((id) => !incomingInternalTargets.has(id));
-
-        return {
-            nodeIds,
-            rootIds,
-            internalLinks,
-            externalLinks,
-        };
+        return parseShellInlineContainerGraphImpl(this.buf);
     }
 
     /** Decode inline face-like records carried by non-link type-0x11 payload segments. */
     parseShellInlineFaceRecords(): PsShellInlineFaceRecord[] {
-        const records: PsShellInlineFaceRecord[] = [];
-
-        this.forEachShellPayloadSegment((entity, segmentIndex, words) => {
-            if (words.length === 0) return;
-            if (words.length === 2 && words[0] === ENTITY_SHELL) return;
-
-            const firstWord = words[0];
-            const inlineType = firstWord >> 8;
-            if (inlineType !== ENTITY_FACE) return;
-
-            records.push({
-                shellId: entity.id,
-                segmentIndex,
-                inlineId: firstWord & 0xff,
-                wordLength: words.length,
-                refs: words.slice(1),
-            });
-        });
-
-        return records;
+        return parseShellInlineFaceRecordsImpl(this.buf);
     }
 
     /** Decode the stable short inline face family that carries global coedge and edge anchors. */
     parseShellInlineFaceAnchorRecords(): PsShellInlineFaceAnchorRecord[] {
-        const coedgeIds = new Set(this.parseCoedgeRecords().map((record) => record.id));
-        const edgeIds = new Set(this.parseEdgeRecords().map((record) => record.id));
-        if (coedgeIds.size === 0 || edgeIds.size === 0) return [];
-
-        return this.parseShellInlineFaceRecords()
-            .filter((record) => {
-                return record.wordLength === 6
-                    && record.refs.length === 5
-                    && coedgeIds.has(record.refs[2])
-                    && edgeIds.has(record.refs[4]);
-            })
-            .map((record) => ({
-                shellId: record.shellId,
-                segmentIndex: record.segmentIndex,
-                inlineId: record.inlineId,
-                refAId: record.refs[0],
-                refBId: record.refs[1],
-                coedgeAnchorId: record.refs[2],
-                refCId: record.refs[3],
-                edgeAnchorId: record.refs[4],
-            }));
+        return parseShellInlineFaceAnchorRecordsImpl(this.buf);
     }
 
     /** Build conservative shell-inline boundary hints from grouped short anchor records. */
     private buildSyntheticShellInlineBoundaryHints(): PsRawFaceBoundaryHint[] {
-        const anchorRecords = this.parseShellInlineFaceAnchorRecords();
-        if (anchorRecords.length === 0) return [];
-
-        const edgePositions = this.buildEdgeChainPositionMap();
-        const groups = new Map<string, {
-            shellId: number;
-            inlineId: number;
-            edgeAnchorIds: Set<number>;
-            coedgeAnchorIds: Set<number>;
-        }>();
-
-        for (const record of anchorRecords) {
-            const key = `${record.shellId}:${record.inlineId}`;
-            const group = groups.get(key) ?? {
-                shellId: record.shellId,
-                inlineId: record.inlineId,
-                edgeAnchorIds: new Set<number>(),
-                coedgeAnchorIds: new Set<number>(),
-            };
-            group.edgeAnchorIds.add(record.edgeAnchorId);
-            group.coedgeAnchorIds.add(record.coedgeAnchorId);
-            groups.set(key, group);
-        }
-
-        return [...groups.values()]
-            .map((group) => {
-                const orderedEdgePositions = [...group.edgeAnchorIds]
-                    .map((edgeId) => edgePositions.get(edgeId))
-                    .filter((position): position is {
-                        chainIndex: number;
-                        componentIndex: number;
-                        edgeIndex: number;
-                        linearIndex: number;
-                    } => position !== undefined)
-                    .map((position) => ({
-                        chainIndex: position.chainIndex,
-                        linearIndex: position.linearIndex,
-                    }))
-                    .sort((left, right) => {
-                        return left.chainIndex - right.chainIndex || left.linearIndex - right.linearIndex;
-                    });
-                const spread = ParasolidParser.buildBoundarySpreadMetrics(orderedEdgePositions);
-
-                return {
-                    faceId: -(group.shellId * 1000 + group.inlineId),
-                    primarySize: group.edgeAnchorIds.size,
-                    collapsedSize: spread.segmentCount >= 3 ? spread.segmentCount : null,
-                    edgeAnchorCount: group.edgeAnchorIds.size,
-                    edgeAnchorIds: [...group.edgeAnchorIds].sort((left, right) => left - right),
-                    coedgeAnchorIds: [...group.coedgeAnchorIds].sort((left, right) => left - right),
-                    repeatedEdgeIds: [],
-                    resolvedSurfaceType: null,
-                    chainCount: spread.chainCount,
-                    segmentCount: spread.segmentCount,
-                    maxSegmentLength: spread.maxSegmentLength,
-                    maxChainSpan: spread.maxChainSpan,
-                };
-            })
-            .filter((hint) => hint.primarySize >= 3);
+        return buildSyntheticShellInlineBoundaryHintsImpl(this.buf);
     }
 
     /** Decode aligned edge-id hits embedded in raw face payloads. */
     parseFaceEdgeHits(): PsFaceEdgeHit[] {
-        const edgeIds = new Set(this.parseEdgeRecords().map((record) => record.id));
-        if (edgeIds.size === 0) return [];
-
-        const edgePositions = this.buildEdgeChainPositionMap();
-        const hits: PsFaceEdgeHit[] = [];
-
-        for (const entity of this.extractAllEntities()) {
-            if (entity.type !== ENTITY_FACE) continue;
-
-            for (let byteOffset = 0; byteOffset + 2 <= entity.data.length; byteOffset += 2) {
-                const edgeId = entity.data.readUInt16BE(byteOffset);
-                if (!edgeIds.has(edgeId)) continue;
-
-                const position = edgePositions.get(edgeId);
-                hits.push({
-                    faceId: entity.id,
-                    byteOffset,
-                    edgeId,
-                    chainIndex: position?.chainIndex ?? null,
-                    componentIndex: position?.componentIndex ?? null,
-                    edgeIndex: position?.edgeIndex ?? null,
-                    linearIndex: position?.linearIndex ?? null,
-                });
-            }
-        }
-
-        return hits;
+        return parseFaceEdgeHitsImpl(this.buf);
     }
 
     /** Collect raw face edge-hit hints for boundary matching. */
@@ -1212,74 +317,17 @@ export class ParasolidParser {
 
     /** Collect derived raw face boundary hints for matching experiments. */
     private buildRawFaceBoundaryHints(extractedSurfaces: PsSurface[] = []): PsRawFaceBoundaryHint[] {
-        const hits = this.parseFaceEdgeHits();
-        if (hits.length === 0) return [];
-        const faceRecords = new Map(this.parseFaceRecords().map((face) => [face.id, face]));
-        const directSurfaceTypes = new Map(extractedSurfaces.map((surface) => [surface.id, surface.surfaceType]));
-
-        const hitsByFace = new Map<number, PsFaceEdgeHit[]>();
-        for (const hit of hits) {
-            const bucket = hitsByFace.get(hit.faceId) ?? [];
-            bucket.push(hit);
-            hitsByFace.set(hit.faceId, bucket);
-        }
-
-        return [...hitsByFace.entries()]
-            .map(([faceId, faceHits]) => {
-                const faceRecord = faceRecords.get(faceId);
-                const primarySize = new Set(faceHits.map((hit) => hit.edgeId)).size;
-                const faceHitCounts = new Map<number, number>();
-                for (const hit of faceHits) {
-                    faceHitCounts.set(hit.edgeId, (faceHitCounts.get(hit.edgeId) ?? 0) + 1);
-                }
-                const positionedHits = faceHits
-                    .filter((hit) => hit.chainIndex !== null && hit.linearIndex !== null)
-                    .map((hit) => ({
-                        chainIndex: hit.chainIndex as number,
-                        linearIndex: hit.linearIndex as number,
-                    }))
-                    .sort((left, right) => left.chainIndex - right.chainIndex || left.linearIndex - right.linearIndex);
-                const spread = ParasolidParser.buildBoundarySpreadMetrics(positionedHits);
-                const edgeAnchorIds = [faceRecord?.edgeAnchorAId, faceRecord?.edgeAnchorBId]
-                    .filter((edgeId): edgeId is number => typeof edgeId === 'number' && edgeId > 0);
-                const coedgeAnchorIds = [faceRecord?.coedgeAnchorAId, faceRecord?.coedgeAnchorBId]
-                    .filter((coedgeId): coedgeId is number => typeof coedgeId === 'number' && coedgeId > 0);
-                const repeatedEdgeIds = [...faceHitCounts.entries()]
-                    .filter(([, count]) => count >= 2)
-                    .map(([edgeId]) => edgeId)
-                    .sort((left, right) => left - right);
-
-                return {
-                    faceId,
-                    primarySize,
-                    collapsedSize: spread.segmentCount >= 3 ? spread.segmentCount : null,
-                    edgeAnchorCount: edgeAnchorIds.length,
-                    edgeAnchorIds,
-                    coedgeAnchorIds,
-                    repeatedEdgeIds,
-                    resolvedSurfaceType: directSurfaceTypes.get(faceRecord?.geometryLikeId ?? -1) ?? null,
-                    chainCount: spread.chainCount,
-                    segmentCount: spread.segmentCount,
-                    maxSegmentLength: spread.maxSegmentLength,
-                    maxChainSpan: spread.maxChainSpan,
-                };
-            })
-            .filter((hint) => hint.primarySize >= 3)
-            .sort((left, right) => {
-                return right.primarySize - left.primarySize
-                    || (right.collapsedSize ?? 0) - (left.collapsedSize ?? 0)
-                    || right.faceId - left.faceId;
-            });
+        return buildRawFaceBoundaryHintsImpl(this.buf, extractedSurfaces);
     }
 
     /** Build a stable key for a heuristic boundary candidate. @internal */
     private static buildBoundaryBudgetKey(surfaceType: string, surfaceId: number, variant = 0): string {
-        return `${surfaceType}:${surfaceId}:${variant}`;
+        return buildBoundaryBudgetKeyImpl(surfaceType, surfaceId, variant);
     }
 
     /** Build a stable coordinate key for matching decoded structural points back to mm-space vertices. @internal */
     private static buildPointCoordKey(point: PsPoint): string {
-        return `${point.x.toFixed(6)},${point.y.toFixed(6)},${point.z.toFixed(6)}`;
+        return buildPointCoordKeyImpl(point);
     }
 
     /** Collapse ordered chain positions into spread metrics shared by raw hints and heuristic candidates. @internal */
@@ -1291,88 +339,12 @@ export class ParasolidParser {
         maxSegmentLength: number;
         maxChainSpan: number | null;
     } {
-        const chainRanges = new Map<number, { min: number; max: number }>();
-        let segmentCount = 0;
-        let previous: { chainIndex: number; linearIndex: number } | null = null;
-        let maxSegmentLength = 0;
-        let currentSegmentLength = 0;
-
-        for (const point of positionedHits) {
-            const range = chainRanges.get(point.chainIndex) ?? { min: point.linearIndex, max: point.linearIndex };
-            range.min = Math.min(range.min, point.linearIndex);
-            range.max = Math.max(range.max, point.linearIndex);
-            chainRanges.set(point.chainIndex, range);
-
-            if (!previous || point.chainIndex !== previous.chainIndex || point.linearIndex - previous.linearIndex > 1) {
-                segmentCount++;
-                currentSegmentLength = 1;
-            } else {
-                currentSegmentLength++;
-            }
-            if (currentSegmentLength > maxSegmentLength) maxSegmentLength = currentSegmentLength;
-            previous = point;
-        }
-
-        let maxChainSpan: number | null = null;
-        for (const range of chainRanges.values()) {
-            const span = range.max - range.min + 1;
-            if (maxChainSpan === null || span > maxChainSpan) maxChainSpan = span;
-        }
-
-        return {
-            chainCount: chainRanges.size,
-            segmentCount,
-            maxSegmentLength,
-            maxChainSpan,
-        };
+        return buildBoundarySpreadMetricsImpl(positionedHits);
     }
 
     /** Project structural point records onto decoded edge-chain positions keyed by mm-space coordinates. @internal */
     private buildPointEdgeChainPositionsByCoord(): Map<string, PointEdgeChainPosition[]> {
-        const pointRecords = this.parsePointRecords();
-        if (pointRecords.length === 0) return new Map();
-
-        const coedgeById = new Map(this.parseCoedgeRecords().map((record) => [record.id, record]));
-        if (coedgeById.size === 0) return new Map();
-
-        const edgeRefBuckets = new Map<number, PsEdgeRecord[]>();
-        for (const edge of this.parseEdgeRecords()) {
-            const bucket = edgeRefBuckets.get(edge.firstRefId) ?? [];
-            bucket.push(edge);
-            edgeRefBuckets.set(edge.firstRefId, bucket);
-        }
-
-        const uniqueEdgeByFirstRef = new Map<number, PsEdgeRecord>();
-        for (const [firstRefId, bucket] of edgeRefBuckets) {
-            if (bucket.length === 1) uniqueEdgeByFirstRef.set(firstRefId, bucket[0]);
-        }
-
-        const edgePositions = this.buildEdgeChainPositionMap();
-        const positionsByCoord = new Map<string, PointEdgeChainPosition[]>();
-
-        for (const point of pointRecords) {
-            const coedge = coedgeById.get(point.nextCoedgeId);
-            if (!coedge) continue;
-
-            const edge = uniqueEdgeByFirstRef.get(coedge.curveLikeId);
-            const edgePosition = edge ? edgePositions.get(edge.id) : undefined;
-
-            const key = ParasolidParser.buildPointCoordKey({
-                x: point.position.x * PS_TO_MM,
-                y: point.position.y * PS_TO_MM,
-                z: point.position.z * PS_TO_MM,
-            });
-            const bucket = positionsByCoord.get(key) ?? [];
-            bucket.push({
-                coedgeId: coedge.id,
-                edgeId: edge?.id ?? null,
-                chainIndex: edgePosition?.chainIndex ?? null,
-                linearIndex: edgePosition?.linearIndex ?? null,
-            });
-            positionsByCoord.set(key, bucket);
-        }
-
-        return positionsByCoord;
+        return buildPointEdgeChainPositionsByCoordImpl(this.buf);
     }
 
     /** Derive candidate-side spread metrics from boundary vertices that map back to edge-chain positions. @internal */
@@ -1389,48 +361,7 @@ export class ParasolidParser {
         maxSegmentLength: number;
         maxChainSpan: number | null;
     } {
-        const uniquePositions = new Map<string, PointEdgeChainPosition>();
-        const uniqueEdgeIds = new Set<number>();
-        const uniqueCoedgeIds = new Set<number>();
-
-        for (const vertexIndex of vertexIndices) {
-            const vertex = vertices[vertexIndex];
-            if (!vertex) continue;
-
-            const key = ParasolidParser.buildPointCoordKey(vertex.position);
-            const bucket = pointEdgePositionsByCoord.get(key) ?? [];
-            for (const position of bucket) {
-                uniqueCoedgeIds.add(position.coedgeId);
-                if (position.edgeId !== null) uniqueEdgeIds.add(position.edgeId);
-                if (position.edgeId !== null && position.chainIndex !== null && position.linearIndex !== null) {
-                    uniquePositions.set(
-                        `${position.edgeId}:${position.chainIndex}:${position.linearIndex}`,
-                        position,
-                    );
-                }
-            }
-        }
-
-        const orderedPositions = [...uniquePositions.values()]
-            .sort((left, right) => {
-                return (left.chainIndex as number) - (right.chainIndex as number)
-                    || (left.linearIndex as number) - (right.linearIndex as number);
-            })
-            .map((position) => ({
-                chainIndex: position.chainIndex as number,
-                linearIndex: position.linearIndex as number,
-            }));
-        const spread = ParasolidParser.buildBoundarySpreadMetrics(orderedPositions);
-
-        return {
-            mappedEdgeCount: uniqueEdgeIds.size,
-            mappedEdgeIds: [...uniqueEdgeIds].sort((left, right) => left - right),
-            mappedCoedgeIds: [...uniqueCoedgeIds].sort((left, right) => left - right),
-            chainCount: spread.chainCount,
-            segmentCount: spread.segmentCount,
-            maxSegmentLength: spread.maxSegmentLength,
-            maxChainSpan: spread.maxChainSpan,
-        };
+        return buildBoundaryCandidateSpreadImpl(vertexIndices, vertices, pointEdgePositionsByCoord);
     }
 
     /** Build heuristic boundary candidates plus candidate-side spread metrics. @internal */
@@ -1524,18 +455,7 @@ export class ParasolidParser {
         hint: PsRawFaceBoundaryHint,
         candidate: BoundaryBudgetCandidate,
     ): number {
-        if (candidate.mappedEdgeCount < 3) return 0;
-
-        let penalty = 0;
-        penalty += Math.abs(candidate.chainCount - hint.chainCount) * 30;
-        penalty += Math.abs(candidate.segmentCount - hint.segmentCount) * 8;
-        penalty += Math.abs(candidate.maxSegmentLength - hint.maxSegmentLength) * 3;
-
-        if (hint.maxChainSpan !== null && candidate.maxChainSpan !== null) {
-            penalty += Math.min(Math.round(Math.abs(candidate.maxChainSpan - hint.maxChainSpan) / 25), 40);
-        }
-
-        return penalty;
+        return computeBoundarySpreadPenaltyImpl(hint, candidate);
     }
 
     /** Penalize candidates that miss explicitly anchored raw face edges. @internal */
@@ -1543,28 +463,7 @@ export class ParasolidParser {
         hint: PsRawFaceBoundaryHint,
         candidate: BoundaryBudgetCandidate,
     ): number {
-        if (hint.edgeAnchorIds.length === 0) return 0;
-        if (candidate.mappedEdgeIds.length === 0) {
-            return hint.edgeAnchorIds.length * 30;
-        }
-
-        const mappedEdgeIds = new Set(candidate.mappedEdgeIds);
-        let matchedAnchors = 0;
-        for (const edgeAnchorId of hint.edgeAnchorIds) {
-            if (mappedEdgeIds.has(edgeAnchorId)) matchedAnchors++;
-        }
-
-        const missingAnchors = hint.edgeAnchorIds.length - matchedAnchors;
-        if (missingAnchors === 0) return 0;
-
-        const perMissingPenalty = candidate.mappedEdgeIds.length >= hint.edgeAnchorIds.length ? 45 : 15;
-        let penalty = missingAnchors * perMissingPenalty;
-
-        if (candidate.mappedEdgeIds.length >= hint.edgeAnchorIds.length && matchedAnchors === 0) {
-            penalty += 25;
-        }
-
-        return penalty;
+        return computeBoundaryAnchorPenaltyImpl(hint, candidate);
     }
 
     /** Penalize candidates that miss explicitly anchored raw face coedges. @internal */
@@ -1572,25 +471,7 @@ export class ParasolidParser {
         hint: PsRawFaceBoundaryHint,
         candidate: BoundaryBudgetCandidate,
     ): number {
-        if (hint.coedgeAnchorIds.length === 0 || candidate.mappedCoedgeIds.length === 0) return 0;
-
-        const mappedCoedgeIds = new Set(candidate.mappedCoedgeIds);
-        let matchedAnchors = 0;
-        for (const coedgeAnchorId of hint.coedgeAnchorIds) {
-            if (mappedCoedgeIds.has(coedgeAnchorId)) matchedAnchors++;
-        }
-
-        const missingAnchors = hint.coedgeAnchorIds.length - matchedAnchors;
-        if (missingAnchors === 0) return 0;
-
-        const perMissingPenalty = candidate.mappedCoedgeIds.length >= hint.coedgeAnchorIds.length ? 18 : 6;
-        let penalty = missingAnchors * perMissingPenalty;
-
-        if (candidate.mappedCoedgeIds.length >= hint.coedgeAnchorIds.length && matchedAnchors === 0) {
-            penalty += 10;
-        }
-
-        return penalty;
+        return computeBoundaryCoedgePenaltyImpl(hint, candidate);
     }
 
     /** Penalize edge-anchored matches that recover no candidate edges at all. @internal */
@@ -1598,12 +479,7 @@ export class ParasolidParser {
         hint: PsRawFaceBoundaryHint,
         candidate: BoundaryBudgetCandidate,
     ): number {
-        if (hint.edgeAnchorIds.length === 0) return 0;
-        if (candidate.mappedEdgeCount > 0) return 0;
-
-        const mappedCoedgeIds = new Set(candidate.mappedCoedgeIds);
-        const coedgeMatches = hint.coedgeAnchorIds.filter((coedgeId) => mappedCoedgeIds.has(coedgeId)).length;
-        return coedgeMatches > 0 ? 20 : 60;
+        return computeBoundaryCoveragePenaltyImpl(hint, candidate);
     }
 
     /** Break duplicate-anchor ties with repeated non-anchor raw hits when available. @internal */
@@ -1611,20 +487,7 @@ export class ParasolidParser {
         hint: PsRawFaceBoundaryHint,
         candidate: BoundaryBudgetCandidate,
     ): number {
-        if (hint.repeatedEdgeIds.length === 0 || candidate.mappedEdgeIds.length === 0) return 0;
-
-        const uniqueEdgeAnchors = new Set(hint.edgeAnchorIds);
-        if (uniqueEdgeAnchors.size === hint.edgeAnchorIds.length) return 0;
-
-        const repeatedNonAnchorIds = hint.repeatedEdgeIds.filter((edgeId) => !uniqueEdgeAnchors.has(edgeId));
-        if (repeatedNonAnchorIds.length === 0) return 0;
-
-        const mappedEdgeIds = new Set(candidate.mappedEdgeIds);
-        for (const edgeId of repeatedNonAnchorIds) {
-            if (mappedEdgeIds.has(edgeId)) return 0;
-        }
-
-        return 8;
+        return computeBoundaryRepeatedHitPenaltyImpl(hint, candidate);
     }
 
     /** Count explicit raw edge anchors recovered by a heuristic boundary candidate. @internal */
@@ -1632,13 +495,7 @@ export class ParasolidParser {
         hint: PsRawFaceBoundaryHint,
         candidate: BoundaryBudgetCandidate,
     ): number {
-        if (hint.edgeAnchorIds.length === 0 || candidate.mappedEdgeIds.length === 0) return 0;
-        const mappedEdgeIds = new Set(candidate.mappedEdgeIds);
-        let matches = 0;
-        for (const edgeAnchorId of hint.edgeAnchorIds) {
-            if (mappedEdgeIds.has(edgeAnchorId)) matches++;
-        }
-        return matches;
+        return countBoundaryAnchorMatchesImpl(hint, candidate);
     }
 
     /** Count explicit raw coedge anchors recovered by a heuristic boundary candidate. @internal */
@@ -1646,13 +503,7 @@ export class ParasolidParser {
         hint: PsRawFaceBoundaryHint,
         candidate: BoundaryBudgetCandidate,
     ): number {
-        if (hint.coedgeAnchorIds.length === 0 || candidate.mappedCoedgeIds.length === 0) return 0;
-        const mappedCoedgeIds = new Set(candidate.mappedCoedgeIds);
-        let matches = 0;
-        for (const coedgeAnchorId of hint.coedgeAnchorIds) {
-            if (mappedCoedgeIds.has(coedgeAnchorId)) matches++;
-        }
-        return matches;
+        return countBoundaryCoedgeMatchesImpl(hint, candidate);
     }
 
     /** Score one raw face hint against one heuristic boundary candidate. @internal */
@@ -1660,351 +511,47 @@ export class ParasolidParser {
         hint: PsRawFaceBoundaryHint,
         candidate: BoundaryBudgetCandidate,
     ): BoundaryBudgetMatchOption | null {
-        if (hint.resolvedSurfaceType && candidate.surfaceType !== hint.resolvedSurfaceType) {
-            return null;
-        }
-
-        const totalDelta = hint.collapsedSize !== null
-            ? Math.abs(candidate.totalSize - hint.collapsedSize)
-            : null;
-
-        const simpleAnchoredPlanePenalty = hint.edgeAnchorCount >= 2
-            && hint.primarySize <= 8
-            && hint.collapsedSize !== null
-            && hint.collapsedSize >= hint.primarySize - 1
-            && candidate.surfaceType === 'plane'
-            && candidate.totalSize > candidate.outerSize
-            ? 15 + (candidate.totalSize - candidate.outerSize) * 5
-            : 0;
-
-        const anchorlessNonPlanePenalty = hint.edgeAnchorCount === 0 && candidate.surfaceType !== 'plane'
-            ? 25
-            : 0;
-        const anchorPenalty = ParasolidParser.computeBoundaryAnchorPenalty(hint, candidate);
-        const coedgePenalty = ParasolidParser.computeBoundaryCoedgePenalty(hint, candidate);
-        const coveragePenalty = ParasolidParser.computeBoundaryCoveragePenalty(hint, candidate);
-        const repeatedHitPenalty = ParasolidParser.computeBoundaryRepeatedHitPenalty(hint, candidate);
-        const spreadPenalty = ParasolidParser.computeBoundarySpreadPenalty(hint, candidate);
-        const anchorMatches = ParasolidParser.countBoundaryAnchorMatches(hint, candidate);
-        const coedgeMatches = ParasolidParser.countBoundaryCoedgeMatches(hint, candidate);
-
-        if (candidate.outerSize === hint.primarySize) {
-            return {
-            score: (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + anchorPenalty + coedgePenalty + coveragePenalty + repeatedHitPenalty + spreadPenalty,
-                outerSize: hint.primarySize,
-                totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
-                    ? hint.collapsedSize ?? undefined
-                    : undefined,
-            };
-        }
-
-        const outerDelta = candidate.outerSize - hint.primarySize;
-        if (
-            outerDelta === 1
-            && hint.primarySize === 3
-            && hint.edgeAnchorCount >= 2
-            && anchorMatches > 0
-        ) {
-            return {
-                score: 80 + (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + anchorPenalty + coedgePenalty + coveragePenalty + repeatedHitPenalty + spreadPenalty,
-                outerSize: hint.primarySize,
-                totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
-                    ? hint.collapsedSize ?? undefined
-                    : undefined,
-            };
-        }
-
-        if (outerDelta >= 2 && outerDelta <= 3) {
-            if (hint.primarySize <= 3 && !hint.resolvedSurfaceType) {
-                return null;
-            }
-            return {
-                score: 100 + outerDelta * 10 + (totalDelta ?? 0) + simpleAnchoredPlanePenalty + anchorlessNonPlanePenalty + anchorPenalty + coedgePenalty + coveragePenalty + repeatedHitPenalty + spreadPenalty,
-                outerSize: hint.primarySize,
-                totalSize: candidate.surfaceType === 'plane' && totalDelta !== null && totalDelta <= 1
-                    ? hint.collapsedSize ?? undefined
-                    : undefined,
-            };
-        }
-
-        if (candidate.surfaceType === 'plane' && hint.collapsedSize !== null && totalDelta !== null && totalDelta <= 1) {
-            return {
-                score: 200 + totalDelta * 10 + Math.min(Math.abs(candidate.outerSize - hint.primarySize), 50) + simpleAnchoredPlanePenalty + anchorPenalty + coedgePenalty + coveragePenalty + repeatedHitPenalty,
-                totalSize: hint.collapsedSize,
-            };
-        }
-
-        return null;
+        return scoreRawFaceBoundaryCandidateImpl(hint, candidate);
     }
 
     /** Recover ordered type-16 components from the observed prev/next links. */
     parseEdgeComponents(): PsEdgeComponent[] {
-        const edges = this.parseEdgeRecords();
-        if (edges.length === 0) return [];
-
-        const edgeIds = new Set(edges.map((record) => record.id));
-        const edgeById = new Map(edges.map((record) => [record.id, record]));
-        const components: PsEdgeComponent[] = [];
-        const seen = new Set<number>();
-        const starts = edges.filter((record) => !edgeIds.has(record.prevEdgeId));
-
-        const walkComponent = (start: PsEdgeRecord): void => {
-            const orderedEdges: PsEdgeRecord[] = [];
-            let current: PsEdgeRecord | undefined = start;
-
-            while (current && !seen.has(current.id)) {
-                orderedEdges.push(current);
-                seen.add(current.id);
-                current = edgeById.get(current.nextEdgeId);
-            }
-
-            if (orderedEdges.length === 0) return;
-            const tail = orderedEdges[orderedEdges.length - 1];
-            components.push({
-                headEdgeId: start.id,
-                tailEdgeId: tail.id,
-                terminalPrevId: start.prevEdgeId,
-                terminalNextId: tail.nextEdgeId,
-                orderedEdges,
-            });
-        };
-
-        for (const start of starts) {
-            if (!seen.has(start.id)) walkComponent(start);
-        }
-
-        for (const edge of edges) {
-            if (!seen.has(edge.id)) walkComponent(edge);
-        }
-
-        return components;
+        return parseEdgeComponentsImpl(this.buf);
     }
 
     /** Recover ordered chains of type-16 components linked by anchor ids. */
     parseEdgeComponentChains(): PsEdgeComponentChain[] {
-        const components = this.parseEdgeComponents();
-        if (components.length === 0) return [];
-
-        const prevCounts = new Map<number, number>();
-        const nextCounts = new Map<number, number>();
-        for (const component of components) {
-            prevCounts.set(component.terminalPrevId, (prevCounts.get(component.terminalPrevId) ?? 0) + 1);
-            nextCounts.set(component.terminalNextId, (nextCounts.get(component.terminalNextId) ?? 0) + 1);
-        }
-
-        const byPrevId = new Map<number, PsEdgeComponent>();
-        const byNextId = new Map<number, PsEdgeComponent>();
-        for (const component of components) {
-            if (prevCounts.get(component.terminalPrevId) === 1) {
-                byPrevId.set(component.terminalPrevId, component);
-            }
-            if (nextCounts.get(component.terminalNextId) === 1) {
-                byNextId.set(component.terminalNextId, component);
-            }
-        }
-
-        const chains: PsEdgeComponentChain[] = [];
-        const seen = new Set<number>();
-        const starts = components.filter((component) => !byNextId.has(component.terminalPrevId));
-
-        const walkChain = (start: PsEdgeComponent): void => {
-            const orderedComponents: PsEdgeComponent[] = [];
-            let current: PsEdgeComponent | undefined = start;
-
-            while (current && !seen.has(current.headEdgeId)) {
-                orderedComponents.push(current);
-                seen.add(current.headEdgeId);
-                current = byPrevId.get(current.terminalNextId);
-            }
-
-            if (orderedComponents.length === 0) return;
-            const tail = orderedComponents[orderedComponents.length - 1];
-            chains.push({
-                headEdgeId: start.headEdgeId,
-                tailEdgeId: tail.tailEdgeId,
-                terminalPrevId: start.terminalPrevId,
-                terminalNextId: tail.terminalNextId,
-                orderedComponents,
-            });
-        };
-
-        for (const start of starts) {
-            if (!seen.has(start.headEdgeId)) walkChain(start);
-        }
-
-        for (const component of components) {
-            if (!seen.has(component.headEdgeId)) walkChain(component);
-        }
-
-        return chains;
+        return parseEdgeComponentChainsImpl(this.buf);
     }
 
     /** Decode the dominant compact type-30/type-31 geometry record layout. */
     parseCompactGeometryRecords(): PsCompactGeometryRecord[] {
-        return this.parseCompactGeometryFamilyRecords(new Set([ENTITY_SURFACE, ENTITY_BSPLINE]));
+        return parseCompactGeometryRecordsImpl(this.buf);
     }
 
     /** Decode the broader compact geometry-like family used by edge geometry links. */
     parseCompactGeometryLikeRecords(): PsCompactGeometryLikeRecord[] {
-        return this.parseCompactGeometryFamilyRecords(
-            new Set([ENTITY_SURFACE, ENTITY_BSPLINE, ENTITY_ATTRIB, ENTITY_GEOM_AUX, ENTITY_GEOM_CHAIN]),
-        );
+        return parseCompactGeometryLikeRecordsImpl(this.buf);
     }
 
     /** Decode packed FF-format geometry-like records used by unresolved edge links. */
     parsePackedGeometryLikeRecords(): PsPackedGeometryLikeRecord[] {
-        const records: PsPackedGeometryLikeRecord[] = [];
-
-        for (let offset = 0; offset + 20 <= this.buf.length; offset++) {
-            if (this.buf[offset] !== 0x00 || this.buf[offset + 2] !== 0xff) continue;
-            const type = this.buf[offset + 1];
-            if (type !== ENTITY_SURFACE && type !== ENTITY_BSPLINE && type !== ENTITY_ATTRIB) continue;
-            if (this.buf[offset + 5] !== 0x00 || this.buf[offset + 6] !== 0x00) continue;
-
-            const id = this.buf.readUInt16BE(offset + 3);
-            if (id === 0 || id > 10000) continue;
-
-            const flags = this.buf.readUInt16BE(offset + 7);
-            const trailer = this.buf.readUInt16BE(offset + 9);
-            if (trailer === 0 || trailer > 0x0400) continue;
-
-            const markerByte = this.buf[offset + 19];
-            if (markerByte !== 0x2b && markerByte !== 0x2d) continue;
-
-            records.push({
-                offset,
-                type,
-                id,
-                flags,
-                trailer,
-                refIds: [
-                    this.buf.readUInt16BE(offset + 11),
-                    this.buf.readUInt16BE(offset + 13),
-                    this.buf.readUInt16BE(offset + 15),
-                    this.buf.readUInt16BE(offset + 17),
-                ],
-                markerByte,
-            });
-        }
-
-        return records;
+        return parsePackedGeometryLikeRecordsImpl(this.buf);
     }
 
     /** Decode conservative aliases for edge targets that point at refIds[1] of a unique record. */
     parseGeometryLikeAliasRecords(): PsGeometryLikeAliasRecord[] {
-        return this.buildGeometryLikeAliases(this.parseDirectGeometryLikeRecords());
+        return parseGeometryLikeAliasRecordsImpl(this.buf);
     }
 
     /** Merge compact and packed geometry-like records for edge-link resolution. */
     parseAllGeometryLikeRecords(): Array<PsDirectGeometryLikeRecord | PsGeometryLikeAliasRecord> {
-        const direct = this.parseDirectGeometryLikeRecords();
-        const records = new Map<number, PsDirectGeometryLikeRecord | PsGeometryLikeAliasRecord>();
-
-        for (const record of direct) {
-            records.set(record.id, record);
-        }
-        for (const record of this.buildGeometryLikeAliases(direct)) {
-            if (!records.has(record.id)) records.set(record.id, record);
-        }
-
-        return [...records.values()];
-    }
-
-    /** Merge the known direct compact and packed geometry-like record families. @internal */
-    private parseDirectGeometryLikeRecords(): PsDirectGeometryLikeRecord[] {
-        const records = new Map<number, PsDirectGeometryLikeRecord>();
-
-        for (const record of this.parseCompactGeometryLikeRecords()) {
-            records.set(record.id, record);
-        }
-        for (const record of this.parsePackedGeometryLikeRecords()) {
-            if (!records.has(record.id)) records.set(record.id, record);
-        }
-
-        return [...records.values()];
-    }
-
-    /** Build alias ids that uniquely reference refIds[1] of a direct geometry-like record. @internal */
-    private buildGeometryLikeAliases(direct: PsDirectGeometryLikeRecord[]): PsGeometryLikeAliasRecord[] {
-        const directIds = new Set(direct.map((record) => record.id));
-        const buckets = new Map<number, PsDirectGeometryLikeRecord[]>();
-
-        for (const record of direct) {
-            const aliasId = record.refIds[1];
-            const bucket = buckets.get(aliasId) ?? [];
-            bucket.push(record);
-            buckets.set(aliasId, bucket);
-        }
-
-        const aliases: PsGeometryLikeAliasRecord[] = [];
-        for (const [aliasId, bucket] of buckets) {
-            if (bucket.length !== 1 || directIds.has(aliasId)) continue;
-
-            const canonical = bucket[0];
-            aliases.push({
-                offset: canonical.offset,
-                type: canonical.type,
-                id: aliasId,
-                canonicalId: canonical.id,
-                flags: canonical.flags,
-                trailer: 'trailer' in canonical ? canonical.trailer : null,
-                refIds: canonical.refIds,
-                markerByte: canonical.markerByte,
-            });
-        }
-
-        return aliases;
-    }
-
-    /** Decode compact record families that use four leading refs plus a marker. @internal */
-    private parseCompactGeometryFamilyRecords(allowedTypes: Set<number>): PsCompactGeometryLikeRecord[] {
-        const records: PsCompactGeometryRecord[] = [];
-
-        for (let offset = 0; offset + 19 <= this.buf.length; offset++) {
-            const type = this.buf[offset + 1];
-            if (this.buf[offset] !== 0x00) continue;
-            if (!allowedTypes.has(type)) continue;
-
-            const header = this.parseLinearEntityHeader(offset, this.buf.length);
-            if (!header || header.format !== 'compact') continue;
-
-            const markerByte = this.buf[offset + 18];
-            if (markerByte !== 0x2b && markerByte !== 0x2d) continue;
-
-            records.push({
-                offset,
-                type,
-                id: header.id,
-                flags: header.flags,
-                refIds: [
-                    this.buf.readUInt16BE(offset + 10),
-                    this.buf.readUInt16BE(offset + 12),
-                    this.buf.readUInt16BE(offset + 14),
-                    this.buf.readUInt16BE(offset + 16),
-                ],
-                markerByte,
-            });
-            offset += 9;
-        }
-
-        return records;
+        return parseAllGeometryLikeRecordsImpl(this.buf);
     }
 
     /** Build a position map for edges that participate in ordered component chains. @internal */
     private buildEdgeChainPositionMap(): Map<number, { chainIndex: number; componentIndex: number; edgeIndex: number; linearIndex: number }> {
-        const positions = new Map<number, { chainIndex: number; componentIndex: number; edgeIndex: number; linearIndex: number }>();
-
-        this.parseEdgeComponentChains().forEach((chain, chainIndex) => {
-            let linearIndex = 0;
-            chain.orderedComponents.forEach((component, componentIndex) => {
-                component.orderedEdges.forEach((edge, edgeIndex) => {
-                    positions.set(edge.id, { chainIndex, componentIndex, edgeIndex, linearIndex });
-                    linearIndex++;
-                });
-            });
-        });
-
-        return positions;
+        return buildEdgeChainPositionMapImpl(this.buf);
     }
 
     /** Evenly decimate an ordered cycle to a smaller number of representatives. @internal */
@@ -2296,48 +843,12 @@ export class ParasolidParser {
 
     /** Decode type-29 gap point records that immediately follow sentinels. */
     parseGapPointRecords(): PsGapPointRecord[] {
-        const records: PsGapPointRecord[] = [];
-
-        for (const sentinelOffset of this.findEightByteSentinelOffsets()) {
-            const record = this.parseGapPointRecordAfterSentinel(sentinelOffset);
-            if (record) records.push(record);
-        }
-
-        return records;
+        return parseGapPointRecordsImpl(this.buf);
     }
 
     /** Decode structural POINT records with stable ids and linked coedge refs. */
     parsePointRecords(): PsPointRecord[] {
-        const records: PsPointRecord[] = [];
-        const seen = new Set<number>();
-        const buf = this.buf;
-
-        const sentPositions: number[] = [];
-        let idx = 0;
-        while ((idx = buf.indexOf(SENTINEL, idx)) >= 0) {
-            sentPositions.push(idx);
-            idx += SENTINEL.length;
-        }
-
-        const packedEnd = sentPositions.length > 0 ? sentPositions[0] : buf.length;
-        this.extractPackedPointRecords(0, packedEnd, records, seen);
-
-        for (let i = 0; i < sentPositions.length; i++) {
-            const blockStart = sentPositions[i] + SENTINEL.length;
-            const blockEnd = i + 1 < sentPositions.length
-                ? sentPositions[i + 1]
-                : buf.length;
-
-            for (let offset = blockStart; offset + POINT_COORD_OFFSET + 24 <= blockEnd; offset++) {
-                const record = this.parseSentinelPointRecordAtOffset(offset);
-                if (!record || seen.has(record.id)) continue;
-                records.push(record);
-                seen.add(record.id);
-                offset += POINT_COORD_OFFSET + 23;
-            }
-        }
-
-        return records;
+        return parsePointRecordsImpl(this.buf);
     }
 
     /**
@@ -2356,281 +867,10 @@ export class ParasolidParser {
      * @param maxPoints  Maximum number of unique points to extract.
      */
     extractCoordinates(maxPoints = 2000): PsPoint[] {
-        // Try structural extraction first (most reliable)
-        const structural = this.extractStructuralPoints(maxPoints);
-        if (structural && structural.length > 0) return structural;
-
-        // Fallback: brute-force scanning with lower limit to avoid false positives
-        const fallbackLimit = Math.min(maxPoints, 500);
-        const buf = this.buf;
-
-        const markers: number[] = [];
-        for (let i = 0; i < buf.length - 1; i++) {
-            if (buf[i] === RECORD_PREFIX &&
-                (buf[i + 1] === RECORD_MARKER_P || buf[i + 1] === RECORD_MARKER_Q)) {
-                markers.push(i);
-            }
-        }
-
-        if (markers.length > 0) {
-            return this.extractFromMarkers(buf, markers, fallbackLimit);
-        }
-
-        return this.extractFromFullScan(buf, fallbackLimit);
+        return extractCoordinatesImpl(this.buf, maxPoints);
     }
-
-    /**
-     * Extract coordinates using structural entity parsing.
-     *
-     * Splits the buffer by the 6-byte sentinel that separates entity blocks,
-     * then within each block locates type-0x1D (POINT) entity records and
-     * reads coordinates at the fixed offset.
-     *
-     * The type-0x1D record layout (40 bytes from type marker to end of z):
-     *   [00 1D] [id:2] [00 00] [ref:2] [00 01] [ref:2] [ref:2] [ref:2]
-     *   [x:f64BE] [y:f64BE] [z:f64BE]
-    *
-    * Some files also store point records in the packed pre-sentinel region.
-    * Those records are not enclosed by sentinel blocks, but still contain a
-    * stable point header and the same 16-byte offset to the x/y/z triplet.
-     *
-     * Validated against all 11 NIST SolidWorks MBD 2018 test files.
-     * Returns null if no sentinels are found (triggers brute-force fallback).
-     *
-     * @internal
-     */
-    private extractStructuralPoints(maxPoints: number): PsPoint[] | null {
-        const buf = this.buf;
-
-        // Find all sentinel positions
-        const sentPositions: number[] = [];
-        let idx = 0;
-        while ((idx = buf.indexOf(SENTINEL, idx)) >= 0) {
-            sentPositions.push(idx);
-            idx += SENTINEL.length;
-        }
-
-        if (sentPositions.length === 0) return null;
-
-        const points: PsPoint[] = [];
-        const seen = new Set<string>();
-
-        // Markerless files such as FTC_11 store valid point records in the
-        // packed pre-sentinel region. Scan that area structurally before
-        // dropping to the brute-force float scanner.
-        this.extractPackedPoints(0, sentPositions[0], maxPoints, points, seen);
-
-        for (let i = 0; i < sentPositions.length && points.length < maxPoints; i++) {
-            const blockStart = sentPositions[i] + SENTINEL.length;
-            const blockEnd = (i + 1 < sentPositions.length)
-                ? sentPositions[i + 1]
-                : buf.length;
-
-            // Scan for type-0x1D markers within this sentinel block
-            for (let j = blockStart; j + POINT_COORD_OFFSET + 24 <= blockEnd; j++) {
-                if (!this.isSentinelPointRecord(j)) continue;
-                if (!this.pushPointAtOffset(j + POINT_COORD_OFFSET, points, seen)) continue;
-                if (points.length >= maxPoints) return points;
-
-                // Skip past this entity record to avoid re-scanning within it
-                j += POINT_COORD_OFFSET + 23;
-            }
-        }
-
-        return points.length > 0 ? points : null;
-    }
-
-    /** Extract packed point records from a byte range outside sentinel blocks. @internal */
-    private extractPackedPoints(
-        start: number,
-        end: number,
-        maxPoints: number,
-        points: PsPoint[],
-        seen: Set<string>,
-    ): void {
-        for (let offset = start; offset + POINT_COORD_OFFSET + 24 <= end && points.length < maxPoints; offset++) {
-            if (!this.isPackedPointRecord(offset)) continue;
-            if (!this.pushPointAtOffset(offset + POINT_COORD_OFFSET, points, seen)) continue;
-            offset += POINT_COORD_OFFSET + 23;
-        }
-    }
-
-    /** Decode packed structural point records from a byte range outside sentinel blocks. @internal */
-    private extractPackedPointRecords(
-        start: number,
-        end: number,
-        records: PsPointRecord[],
-        seen: Set<number>,
-    ): void {
-        for (let offset = start; offset + POINT_COORD_OFFSET + 24 <= end; offset++) {
-            const record = this.parsePackedPointRecordAtOffset(offset);
-            if (!record || seen.has(record.id)) continue;
-            records.push(record);
-            seen.add(record.id);
-            offset += POINT_COORD_OFFSET + 23;
-        }
-    }
-
-    /** Validate the standard sentinel-block POINT record layout. @internal */
-    private isSentinelPointRecord(offset: number): boolean {
-        const buf = this.buf;
-        if (offset + POINT_COORD_OFFSET + 24 > buf.length) return false;
-        if (buf[offset] !== 0x00 || buf[offset + 1] !== ENTITY_POINT) return false;
-        if (buf[offset + 4] !== 0x00 || buf[offset + 5] !== 0x00) return false;
-        return buf[offset + 8] === 0x00 && buf[offset + 9] === 0x01;
-    }
-
-    /**
-     * Validate the packed FF-style POINT layout seen before the sentinel zone.
-     * The x/y/z triplet still begins 16 bytes after the type marker.
-     * @internal
-     */
-    private isPackedPointRecord(offset: number): boolean {
-        const buf = this.buf;
-        if (offset + POINT_COORD_OFFSET + 24 > buf.length) return false;
-        if (buf[offset] !== 0x00 || buf[offset + 1] !== ENTITY_POINT) return false;
-        if (buf[offset + 2] !== 0xff) return false;
-        if (buf[offset + 5] !== 0x00 || buf[offset + 6] !== 0x00) return false;
-
-        // Four uint16 references precede the coordinate triplet in the packed body.
-        for (let refOffset = offset + 8; refOffset < offset + POINT_COORD_OFFSET; refOffset += 2) {
-            const ref = buf.readUInt16BE(refOffset);
-            if (ref > 60000) return false;
-        }
-
-        return this.tryReadTriplet(buf, offset + POINT_COORD_OFFSET) !== null;
-    }
-
-    /** Decode one sentinel-block point record at a known structural offset. @internal */
-    private parseSentinelPointRecordAtOffset(offset: number): PsPointRecord | null {
-        if (!this.isSentinelPointRecord(offset)) return null;
-
-        const position = this.tryReadTriplet(this.buf, offset + POINT_COORD_OFFSET);
-        if (!position) return null;
-
-        return {
-            offset,
-            format: 'sentinel',
-            id: this.buf.readUInt16BE(offset + 2),
-            flags: this.buf.readUInt16BE(offset + 6),
-            nextCoedgeId: this.buf.readUInt16BE(offset + 10),
-            nextPointId: this.buf.readUInt16BE(offset + 12),
-            prevPointId: this.buf.readUInt16BE(offset + 14),
-            position,
-        };
-    }
-
-    /** Decode one packed structural point record at a known structural offset. @internal */
-    private parsePackedPointRecordAtOffset(offset: number): PsPointRecord | null {
-        if (!this.isPackedPointRecord(offset)) return null;
-
-        const position = this.tryReadTriplet(this.buf, offset + POINT_COORD_OFFSET);
-        if (!position) return null;
-
-        return {
-            offset,
-            format: 'packed',
-            id: this.buf.readUInt16BE(offset + 3),
-            flags: this.buf.readUInt16BE(offset + 7),
-            nextCoedgeId: this.buf.readUInt16BE(offset + 8),
-            nextPointId: this.buf.readUInt16BE(offset + 10),
-            prevPointId: this.buf.readUInt16BE(offset + 12),
-            position,
-        };
-    }
-
-    /** Deduplicate and append a point read from a known coordinate offset. @internal */
-    private pushPointAtOffset(offset: number, points: PsPoint[], seen: Set<string>): boolean {
-        const point = this.tryReadTriplet(this.buf, offset);
-        if (!point) return false;
-
-        const key = `${point.x.toFixed(9)},${point.y.toFixed(9)},${point.z.toFixed(9)}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        points.push(point);
-        return true;
-    }
-
-    /**
-     * Count entity types in the binary transmit stream using sentinel-based
-     * structural parsing.
-     *
-     * Splits by sentinel, then within each block searches for known entity
-     * type markers (00 XX where XX is a known Parasolid type code).
-     */
     getEntityCensus(): PsEntityCensus {
-        const buf = this.buf;
-        const census: PsEntityCensus = {
-            sentinels: 0, points: 0, coedges: 0, edges: 0,
-            faces: 0, surfaces: 0, shells: 0, loops: 0, other: 0,
-        };
-
-        // Find sentinels
-        let idx = 0;
-        while ((idx = buf.indexOf(SENTINEL, idx)) >= 0) {
-            census.sentinels++;
-            idx += SENTINEL.length;
-        }
-
-        if (census.sentinels === 0) return census;
-
-        // Scan for entity type markers preceded by 0x00 0x03
-        // The pattern [00 03 00 XX] precedes every entity record
-        for (let i = 0; i < buf.length - 3; i++) {
-            if (buf[i] !== 0x00 || buf[i + 1] !== 0x03 || buf[i + 2] !== 0x00) continue;
-
-            const type = buf[i + 3];
-            switch (type) {
-                case ENTITY_POINT:   census.points++;   break;
-                case ENTITY_COEDGE:  census.coedges++;  break;
-                case ENTITY_EDGE:    census.edges++;    break;
-                case ENTITY_FACE:    census.faces++;    break;
-                case ENTITY_SURFACE: census.surfaces++; break;
-                case ENTITY_BSPLINE: census.surfaces++; break;
-                case ENTITY_SHELL:   census.shells++;   break;
-                case ENTITY_LOOP:    census.loops++;    break;
-                default:
-                    // Only count types in the known Parasolid range
-                    if (type >= 0x0f && type <= 0x3f) census.other++;
-            }
-        }
-
-        return census;
-    }
-
-    /** Extract coordinate triplets from =p/=q record markers. @internal */
-    private extractFromMarkers(buf: Buffer, markers: number[], maxPoints: number): PsPoint[] {
-        const points: PsPoint[] = [];
-        const seen = new Set<string>();
-
-        for (let mi = 0; mi < markers.length; mi++) {
-            const markerOff = markers[mi];
-            const isP = buf[markerOff + 1] === RECORD_MARKER_P;
-
-            // Record extends from marker to the next marker (or +20000, whichever first)
-            const recordEnd = mi + 1 < markers.length
-                ? markers[mi + 1]
-                : Math.min(markerOff + 20000, buf.length);
-
-            // =p records: 2 bytes marker + 3 bytes tag = data at +5
-            // =q records: 2 bytes marker = data at +2
-            const dataStart = markerOff + (isP ? 5 : 2);
-
-            // Scan the record for float64 BE triplets
-            for (let j = dataStart; j + 24 <= recordEnd; j++) {
-                const pt = this.tryReadTriplet(buf, j);
-                if (!pt) continue;
-
-                const key = `${pt.x.toFixed(6)},${pt.y.toFixed(6)},${pt.z.toFixed(6)}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-
-                points.push(pt);
-                if (points.length >= maxPoints) return points;
-            }
-        }
-
-        return points;
+        return getEntityCensusImpl(this.buf);
     }
 
     /** Resolve the safest start offset for markerless float scanning. @internal */
@@ -2644,55 +884,19 @@ export class ParasolidParser {
         }
 
         const metadata = this.parseSchemaMetadata();
-        if (metadata &&
-            metadata.metadataEndOffset >= 0 &&
-            metadata.metadataEndOffset < this.buf.length &&
-            (metadata.firstSentinelOffset === null || metadata.metadataEndOffset < metadata.firstSentinelOffset) &&
-            (metadata.firstEntityOffset === null || (
-                metadata.firstEntityHeader?.offset === metadata.firstEntityOffset &&
-                metadata.firstEntityOffset >= metadata.metadataEndOffset &&
-                (metadata.firstSentinelOffset === null || metadata.firstEntityOffset < metadata.firstSentinelOffset)
+        if (metadata
+            && metadata.metadataEndOffset >= 0
+            && metadata.metadataEndOffset < this.buf.length
+            && (metadata.firstSentinelOffset === null || metadata.metadataEndOffset < metadata.firstSentinelOffset)
+            && (metadata.firstEntityOffset === null || (
+                metadata.firstEntityHeader?.offset === metadata.firstEntityOffset
+                && metadata.firstEntityOffset >= metadata.metadataEndOffset
+                && (metadata.firstSentinelOffset === null || metadata.firstEntityOffset < metadata.firstSentinelOffset)
             ))) {
-            // The first standard linear header can appear after packed entity-1
-            // payload bytes, but FTC_11 still needs the historical later cut.
             return Math.max(legacyStart, Math.max(0x60, metadata.metadataEndOffset));
         }
 
         return legacyStart;
-    }
-
-    /**
-     * Fallback: scan the full buffer for BE float64 triplets (no markers).
-     * Uses stricter checks: at least one component must have |val| > 0.001.
-     * Skips the header/schema area (first ~0x400 bytes).
-     * @internal
-     */
-    private extractFromFullScan(buf: Buffer, maxPoints: number): PsPoint[] {
-        const points: PsPoint[] = [];
-        const seen = new Set<string>();
-
-        // Prefer the decoded schema boundary when it is internally consistent,
-        // otherwise keep the historical last-'Z' fallback.
-        const dataStart = this.resolveFullScanStart();
-
-        for (let j = dataStart; j + 24 <= buf.length; j++) {
-            const pt = this.tryReadTriplet(buf, j);
-            if (!pt) continue;
-
-            // Stricter filter for markerless scan:
-            // at least one component must be significantly non-zero
-            const mx = Math.max(Math.abs(pt.x), Math.abs(pt.y), Math.abs(pt.z));
-            if (mx < 0.001) continue;
-
-            const key = `${pt.x.toFixed(6)},${pt.y.toFixed(6)},${pt.z.toFixed(6)}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-
-            points.push(pt);
-            if (points.length >= maxPoints) return points;
-        }
-
-        return points;
     }
 
     /**
@@ -2708,317 +912,7 @@ export class ParasolidParser {
      * @internal
      */
     private extractAllEntities(): RawEntity[] {
-        const buf = this.buf;
-        const entities: RawEntity[] = [];
-
-        // Find all sentinel positions
-        const sentPositions: number[] = [];
-        let idx = 0;
-        while ((idx = buf.indexOf(SENTINEL, idx)) >= 0) {
-            sentPositions.push(idx);
-            idx += SENTINEL.length;
-        }
-        if (sentPositions.length === 0) return entities;
-
-        for (let i = 0; i < sentPositions.length; i++) {
-            const blockStart = sentPositions[i] + SENTINEL.length;
-            const blockEnd = (i + 1 < sentPositions.length)
-                ? sentPositions[i + 1]
-                : buf.length;
-            const block = buf.subarray(blockStart, blockEnd);
-            if (block.length < 8) continue;
-
-            // Split block by SUB_RECORD_SEP
-            const subRecords: Array<{ data: Buffer; offset: number }> = [];
-            let searchStart = 0;
-            while (true) {
-                const sepIdx = block.indexOf(SUB_RECORD_SEP, searchStart);
-                if (sepIdx < 0) {
-                    subRecords.push({ data: block.subarray(searchStart), offset: blockStart + searchStart });
-                    break;
-                }
-                subRecords.push({ data: block.subarray(searchStart, sepIdx), offset: blockStart + searchStart });
-                searchStart = sepIdx + SUB_RECORD_SEP.length;
-            }
-
-            for (let si = 0; si < subRecords.length; si++) {
-                const { data: rec, offset } = subRecords[si];
-                if (si === 0) {
-                    // Primary entity: [00 00 00 03 00 TYPE ID_hi ID_lo]
-                    if (rec.length < 8) continue;
-                    if (rec.readUInt32BE(0) !== 3) continue;
-                    const type = rec[5];
-                    if (type < 0x0d || type > 0x3f) continue;
-                    const id = rec.readUInt16BE(6);
-                    entities.push({ type, id, offset, primary: true, data: rec.subarray(8) });
-                } else {
-                    // Sub-record: [00 TYPE ID_hi ID_lo]
-                    if (rec.length < 4) continue;
-                    if (rec[0] !== 0x00) continue;
-                    const type = rec[1];
-                    if (type < 0x0d || type > 0x3f) continue;
-                    const id = rec.readUInt16BE(2);
-                    entities.push({ type, id, offset, primary: false, data: rec.subarray(4) });
-                }
-            }
-        }
-
-        return entities;
-    }
-
-    /** Parse type-code/name tokens from the schema block. @internal */
-    private parseSchemaFieldDefinitions(start: number, end: number): PsSchemaFieldDefinition[] {
-        const definitions: PsSchemaFieldDefinition[] = [];
-
-        for (let offset = start; offset < end; offset++) {
-            if (!SCHEMA_FIELD_TYPE_BYTES.has(this.buf[offset])) continue;
-
-            let typeEnd = offset;
-            while (typeEnd < end && SCHEMA_FIELD_TYPE_BYTES.has(this.buf[typeEnd])) {
-                typeEnd++;
-            }
-            const typeLength = typeEnd - offset;
-            if (typeLength === 0 || typeLength > 8 || typeEnd >= end) continue;
-
-            const nameLength = this.buf[typeEnd];
-            if (nameLength <= 0 || nameLength > 96) continue;
-
-            const nameStart = typeEnd + 1;
-            const nameEnd = nameStart + nameLength;
-            if (nameEnd > end) continue;
-
-            const name = this.buf.subarray(nameStart, nameEnd).toString('ascii');
-            if (!/^[\x20-\x7e]+$/.test(name) || !/[A-Za-z]/.test(name)) continue;
-
-            definitions.push({
-                offset,
-                endOffset: nameEnd,
-                typeCodes: this.buf.subarray(offset, typeEnd).toString('ascii'),
-                name,
-            });
-            offset = nameEnd - 1;
-        }
-
-        return definitions;
-    }
-
-    /** Parse the named class catalogue that follows the schema field block. @internal */
-    private parseNamedClassDefinitions(start: number, end: number): PsNamedClassDefinition[] {
-        const namedClasses: PsNamedClassDefinition[] = [];
-
-        for (let offset = start; offset + 12 <= end; offset++) {
-            if (!ParasolidParser.isNamedClassChar(this.buf[offset])) continue;
-
-            let nameEnd = offset;
-            while (nameEnd < end && ParasolidParser.isNamedClassChar(this.buf[nameEnd])) {
-                nameEnd++;
-            }
-            const nameLength = nameEnd - offset;
-            if (nameLength < 3 || nameLength > 80) {
-                offset = nameEnd;
-                continue;
-            }
-            if (nameEnd + 11 >= end || this.buf[nameEnd] !== 0x00) {
-                offset = nameEnd;
-                continue;
-            }
-
-            const classType = NAMED_CLASS_TYPE_BYTES.get(this.buf[nameEnd + 1]);
-            if (!classType) {
-                offset = nameEnd;
-                continue;
-            }
-
-            const name = this.buf.subarray(offset, nameEnd).toString('ascii');
-            if (!/^[A-Za-z0-9_\/-]+$/.test(name)) {
-                offset = nameEnd;
-                continue;
-            }
-
-            namedClasses.push({
-                offset,
-                endOffset: nameEnd + 12,
-                name,
-                classType,
-                flags: this.buf[nameEnd + 2],
-                extra: this.buf.readUInt16BE(nameEnd + 3),
-                count: this.buf[nameEnd + 5],
-                parentId: this.buf.readUInt16BE(nameEnd + 6),
-                fieldStart: this.buf.readUInt16BE(nameEnd + 8),
-                fieldEnd: this.buf.readUInt16BE(nameEnd + 10),
-            });
-            offset = nameEnd + 11;
-        }
-
-        return namedClasses;
-    }
-
-    /** Find the last schema-block terminator ('Z') before the entity region. @internal */
-    private findLastSchemaTerminator(start: number, end: number): number {
-        for (let offset = end - 1; offset >= start; offset--) {
-            if (this.buf[offset] === 0x5a) return offset;
-        }
-        return -1;
-    }
-
-    /** Find the first plausible linear entity header between metadata and the sentinel zone. @internal */
-    private findFirstLinearEntityHeader(
-        start: number,
-        end: number,
-        firstSentinelOffset: number | null,
-    ): PsLinearEntityHeader | null {
-        for (let offset = start; offset + 10 <= end; offset++) {
-            const header = this.parseLinearEntityHeader(offset, end);
-            if (header) {
-                return header;
-            }
-        }
-
-        if (firstSentinelOffset !== null) {
-            const packedOffset = firstSentinelOffset - 11;
-            if (packedOffset >= start) {
-                const header = this.parseLinearEntityHeader(packedOffset, firstSentinelOffset);
-                if (header) return header;
-            }
-
-            const compactOffset = firstSentinelOffset - 10;
-            if (compactOffset >= start) {
-                const header = this.parseLinearEntityHeader(compactOffset, firstSentinelOffset);
-                if (header) return header;
-            }
-        }
-
-        return null;
-    }
-
-    /** Find every observed 8-byte sentinel in the linear entity zone. @internal */
-    private findEightByteSentinelOffsets(): number[] {
-        const offsets: number[] = [];
-        let searchOffset = 0;
-        while ((searchOffset = this.buf.indexOf(SENTINEL_8, searchOffset)) >= 0) {
-            offsets.push(searchOffset);
-            searchOffset += SENTINEL_8.length;
-        }
-        return offsets;
-    }
-
-    /** Decode a compact or packed linear entity header if one starts at offset. @internal */
-    private parseLinearEntityHeader(offset: number, end: number): PsLinearEntityHeader | null {
-        if (this.isCompactLinearRecord(offset, end)) {
-            return {
-                offset,
-                format: 'compact',
-                type: this.buf[offset + 1],
-                id: this.buf.readUInt16BE(offset + 2),
-                flags: this.buf.readUInt16BE(offset + 6),
-                trailer: null,
-            };
-        }
-
-        if (this.isPackedLinearRecord(offset, end)) {
-            return {
-                offset,
-                format: 'packed',
-                type: this.buf[offset + 1],
-                id: this.buf.readUInt16BE(offset + 3),
-                flags: this.buf.readUInt16BE(offset + 7),
-                trailer: this.buf.readUInt16BE(offset + 9),
-            };
-        }
-
-        return null;
-    }
-
-    /** Read packed-record refs after an embedded sentinel when they look like IDs. @internal */
-    private readPackedPostSentinelRefs(sentinelOffset: number): number[] {
-        const refs: number[] = [];
-        const refsStart = sentinelOffset + SENTINEL_8.length;
-        const refsEnd = Math.min(this.buf.length, refsStart + 12);
-
-        for (let offset = refsStart; offset + 2 <= refsEnd; offset += 2) {
-            const ref = this.buf.readUInt16BE(offset);
-            if (ref > 10000) return [];
-            refs.push(ref);
-        }
-
-        return refs;
-    }
-
-    /** Decode a type-29 gap point record immediately after a sentinel. @internal */
-    private parseGapPointRecordAfterSentinel(sentinelOffset: number): PsGapPointRecord | null {
-        const separatorOffset = sentinelOffset + SENTINEL_8.length;
-        const headerOffset = separatorOffset + 2;
-        const recordEnd = headerOffset + 40;
-        if (recordEnd > this.buf.length) return null;
-        if (this.buf.readUInt16BE(separatorOffset) !== 0x0003) return null;
-
-        const header = this.parseLinearEntityHeader(headerOffset, headerOffset + 10);
-        if (!header || header.format !== 'compact' || header.type !== ENTITY_POINT) return null;
-
-        const x = this.buf.readDoubleBE(headerOffset + 18);
-        const y = this.buf.readDoubleBE(headerOffset + 26);
-        const z = this.buf.readDoubleBE(headerOffset + 34);
-        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return null;
-
-        return {
-            sentinelOffset,
-            separatorOffset,
-            id: header.id,
-            flags: header.flags,
-            nextCoedgeId: this.buf.readUInt16BE(headerOffset + 10),
-            nextPointId: this.buf.readUInt16BE(headerOffset + 12),
-            prevPointId: this.buf.readUInt16BE(headerOffset + 14),
-            position: { x, y, z },
-        };
-    }
-
-    /** Compact pre-sentinel header: [00 type] [id:2] [00 00] [flags:2] [00 01]. @internal */
-    private isCompactLinearRecord(offset: number, end: number): boolean {
-        if (offset + 10 > end) return false;
-        if (this.buf[offset] !== 0x00) return false;
-        const type = this.buf[offset + 1];
-        if (type < 0x0f || type > 0x90) return false;
-        const id = this.buf.readUInt16BE(offset + 2);
-        if (id === 0 || id > 10000) return false;
-        if (this.buf[offset + 4] !== 0x00 || this.buf[offset + 5] !== 0x00) return false;
-        return this.buf[offset + 8] === 0x00 && this.buf[offset + 9] === 0x01;
-    }
-
-    /** Packed FF-style header observed before the sentinel zone. @internal */
-    private isPackedLinearRecord(offset: number, end: number): boolean {
-        // Minimal packed header layout observed before the first sentinel:
-        // [00 type] [FF] [id:2] [00 00] [flags:2] [00 01]
-        if (offset + 11 > end) return false;
-        if (this.buf[offset] !== 0x00 || this.buf[offset + 2] !== 0xff) return false;
-        const type = this.buf[offset + 1];
-        if (type < 0x0f || type > 0x90) return false;
-        const id = this.buf.readUInt16BE(offset + 3);
-        if (id === 0 || id > 10000) return false;
-        if (this.buf[offset + 5] !== 0x00 || this.buf[offset + 6] !== 0x00) return false;
-        const trailer = this.buf.readUInt16BE(offset + 9);
-        const hasSmallTrailer = trailer > 0 && trailer <= 0x0400;
-        if (!hasSmallTrailer) return false;
-
-        // Many first records end immediately at the sentinel. When extra bytes
-        // are present, use them as a confidence boost rather than a hard
-        // requirement so metadata tracing still works on the short header form.
-        if (offset + 16 > end) return true;
-
-        let smallRefs = 0;
-        for (let refOffset = offset + 8; refOffset < offset + 16; refOffset += 2) {
-            if (this.buf.readUInt16BE(refOffset) <= 60000) smallRefs++;
-        }
-        return smallRefs >= 4 || this.tryReadTriplet(this.buf, offset + 16) !== null;
-    }
-
-    /** Allowed character set for named class tokens. @internal */
-    private static isNamedClassChar(byte: number): boolean {
-        return (byte >= 0x30 && byte <= 0x39) ||
-            (byte >= 0x41 && byte <= 0x5a) ||
-            (byte >= 0x61 && byte <= 0x7a) ||
-            byte === 0x2f ||
-            byte === 0x2d ||
-            byte === 0x5f;
+        return extractAllEntitiesImpl(this.buf);
     }
 
     /**
@@ -3444,29 +1338,7 @@ export class ParasolidParser {
      * @internal
      */
     private static filterOutlierVertices(vertices: PsVertex[]): PsVertex[] {
-        if (vertices.length < 20) return vertices;
-
-        const coords = [
-            vertices.map(v => v.position.x),
-            vertices.map(v => v.position.y),
-            vertices.map(v => v.position.z),
-        ];
-
-        const bounds: Array<{ lo: number; hi: number }> = coords.map(arr => {
-            const sorted = arr.slice().sort((a, b) => a - b);
-            const q1 = sorted[Math.floor(sorted.length * 0.25)];
-            const q3 = sorted[Math.floor(sorted.length * 0.75)];
-            const iqr = q3 - q1;
-            return { lo: q1 - 3 * iqr, hi: q3 + 3 * iqr };
-        });
-
-        const filtered = vertices.filter(v =>
-            v.position.x >= bounds[0].lo && v.position.x <= bounds[0].hi &&
-            v.position.y >= bounds[1].lo && v.position.y <= bounds[1].hi &&
-            v.position.z >= bounds[2].lo && v.position.z <= bounds[2].hi,
-        );
-
-        return filtered.length >= 3 ? filtered : vertices;
+        return filterOutlierVerticesImpl(vertices);
     }
 
     // ── PCA eigenvalue ratio for LINE/PLANE discrimination ─────────────
@@ -3483,45 +1355,7 @@ export class ParasolidParser {
         coplanarVertices: PsPoint[],
         normal: PsPoint,
     ): number {
-        if (coplanarVertices.length < 3) return Infinity;
-
-        const { uAxis, vAxis } = ParasolidParser.planeBasis(normal);
-
-        // Project to 2D
-        const pts = coplanarVertices.map(v => ({
-            u: v.x * uAxis.x + v.y * uAxis.y + v.z * uAxis.z,
-            v: v.x * vAxis.x + v.y * vAxis.y + v.z * vAxis.z,
-        }));
-
-        // Compute centroid
-        let cu = 0, cv = 0;
-        for (const p of pts) { cu += p.u; cv += p.v; }
-        cu /= pts.length;
-        cv /= pts.length;
-
-        // Compute 2×2 covariance matrix
-        let cov00 = 0, cov01 = 0, cov11 = 0;
-        for (const p of pts) {
-            const du = p.u - cu, dv = p.v - cv;
-            cov00 += du * du;
-            cov01 += du * dv;
-            cov11 += dv * dv;
-        }
-        cov00 /= pts.length;
-        cov01 /= pts.length;
-        cov11 /= pts.length;
-
-        // Eigenvalues of symmetric 2×2: λ = (trace ± √(trace² − 4·det)) / 2
-        const trace = cov00 + cov11;
-        const det = cov00 * cov11 - cov01 * cov01;
-        const disc = trace * trace - 4 * det;
-        if (disc < 0) return 1; // shouldn't happen for symmetric
-        const sqrtDisc = Math.sqrt(disc);
-        const lambda1 = (trace + sqrtDisc) / 2;
-        const lambda2 = (trace - sqrtDisc) / 2;
-
-        if (lambda2 < 1e-10) return Infinity; // perfectly collinear
-        return lambda1 / lambda2;
+        return computeEigenvalueRatioImpl(coplanarVertices, normal);
     }
 
     // ── Surface deduplication ────────────────────────────────────────────────
@@ -3787,45 +1621,7 @@ export class ParasolidParser {
     private static convexHull2D(
         pts: Array<{ u: number; v: number; idx: number }>,
     ): Array<{ u: number; v: number; idx: number }> {
-        if (pts.length <= 2) return [...pts];
-
-        const sorted = pts.slice().sort((a, b) => a.u - b.u || a.v - b.v);
-        const n = sorted.length;
-
-        // Remove near-duplicate points
-        const unique: typeof sorted = [sorted[0]];
-        for (let i = 1; i < n; i++) {
-            const prev = unique[unique.length - 1];
-            if (Math.abs(sorted[i].u - prev.u) > 1e-6 || Math.abs(sorted[i].v - prev.v) > 1e-6) {
-                unique.push(sorted[i]);
-            }
-        }
-        if (unique.length <= 1) return unique;
-        if (unique.length === 2) return unique;
-
-        const cross = (o: typeof sorted[0], a: typeof sorted[0], b: typeof sorted[0]) =>
-            (a.u - o.u) * (b.v - o.v) - (a.v - o.v) * (b.u - o.u);
-
-        // Lower hull
-        const lower: typeof sorted = [];
-        for (const p of unique) {
-            while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0)
-                lower.pop();
-            lower.push(p);
-        }
-        // Upper hull
-        const upper: typeof sorted = [];
-        for (let i = unique.length - 1; i >= 0; i--) {
-            const p = unique[i];
-            while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0)
-                upper.pop();
-            upper.push(p);
-        }
-
-        // Remove last point of each half (it's the first of the other)
-        lower.pop();
-        upper.pop();
-        return lower.concat(upper);
+        return convexHull2DImpl(pts);
     }
 
     /**
@@ -3834,21 +1630,7 @@ export class ParasolidParser {
      * @internal
      */
     private static planeBasis(normal: PsPoint): { uAxis: PsPoint; vAxis: PsPoint } {
-        // Pick an axis not parallel to the normal
-        const arbitrary: PsPoint = Math.abs(normal.z) < 0.9
-            ? { x: 0, y: 0, z: 1 }
-            : { x: 1, y: 0, z: 0 };
-        // U = normalize(cross(normal, arbitrary))
-        let ux = normal.y * arbitrary.z - normal.z * arbitrary.y;
-        let uy = normal.z * arbitrary.x - normal.x * arbitrary.z;
-        let uz = normal.x * arbitrary.y - normal.y * arbitrary.x;
-        const uLen = Math.sqrt(ux * ux + uy * uy + uz * uz);
-        ux /= uLen; uy /= uLen; uz /= uLen;
-        // V = cross(normal, U)
-        const vx = normal.y * uz - normal.z * uy;
-        const vy = normal.z * ux - normal.x * uz;
-        const vz = normal.x * uy - normal.y * ux;
-        return { uAxis: { x: ux, y: uy, z: uz }, vAxis: { x: vx, y: vy, z: vz } };
+        return planeBasisImpl(normal);
     }
 
     /**
@@ -3861,35 +1643,7 @@ export class ParasolidParser {
         pts: Array<{ u: number; v: number; idx: number }>,
         threshold: number,
     ): Array<Array<{ u: number; v: number; idx: number }>> {
-        const n = pts.length;
-        const assigned = new Int32Array(n).fill(-1);
-        let nextCluster = 0;
-        const threshSq = threshold * threshold;
-
-        for (let i = 0; i < n; i++) {
-            if (assigned[i] >= 0) continue;
-            const cluster = nextCluster++;
-            const queue = [i];
-            assigned[i] = cluster;
-            while (queue.length > 0) {
-                const ci = queue.shift()!;
-                const cu = pts[ci].u, cv = pts[ci].v;
-                for (let j = 0; j < n; j++) {
-                    if (assigned[j] >= 0) continue;
-                    const du = cu - pts[j].u, dv = cv - pts[j].v;
-                    if (du * du + dv * dv <= threshSq) {
-                        assigned[j] = cluster;
-                        queue.push(j);
-                    }
-                }
-            }
-        }
-
-        const clusters: Array<Array<{ u: number; v: number; idx: number }>> = [];
-        for (let c = 0; c < nextCluster; c++) {
-            clusters.push(pts.filter((_, i) => assigned[i] === c));
-        }
-        return clusters;
+        return clusterPoints2DImpl(pts, threshold);
     }
 
     /**
@@ -3902,14 +1656,7 @@ export class ParasolidParser {
         pu: number,
         pv: number,
     ): boolean {
-        for (let i = 0; i < hull.length; i++) {
-            const a = hull[i];
-            const b = hull[(i + 1) % hull.length];
-            // cross product (edge direction) × (point − edge start)
-            const cross = (b.u - a.u) * (pv - a.v) - (b.v - a.v) * (pu - a.u);
-            if (cross < -1e-6) return false;
-        }
-        return true;
+        return isPointInConvexHullImpl(hull, pu, pv);
     }
 
     /**
@@ -3922,16 +1669,7 @@ export class ParasolidParser {
         pu: number,
         pv: number,
     ): boolean {
-        let inside = false;
-        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-            const ui = poly[i].u, vi = poly[i].v;
-            const uj = poly[j].u, vj = poly[j].v;
-            if ((vi > pv) !== (vj > pv) &&
-                pu < (uj - ui) * (pv - vi) / (vj - vi) + ui) {
-                inside = !inside;
-            }
-        }
-        return inside;
+        return isPointInPolygonImpl(poly, pu, pv);
     }
 
     /** Normalize a direction vector, falling back to +Z for degenerate input. */
@@ -5803,26 +3541,6 @@ export class ParasolidParser {
         }
 
         return { faces, loops, edges, curves, extraVertices };
-    }
-
-    /** Try to read a float64 BE triplet at offset. Returns null if invalid. @internal */
-    private tryReadTriplet(buf: Buffer, offset: number): PsPoint | null {
-        if (offset + 24 > buf.length) return null;
-
-        const x = buf.readDoubleBE(offset);
-        const y = buf.readDoubleBE(offset + 8);
-        const z = buf.readDoubleBE(offset + 16);
-
-        // Must be finite and within engineering range
-        if (!isFinite(x) || !isFinite(y) || !isFinite(z)) return null;
-        if (Math.abs(x) > 1e4 || Math.abs(y) > 1e4 || Math.abs(z) > 1e4) return null;
-        // Skip if all three are exactly zero (common padding, not geometry)
-        if (x === 0 && y === 0 && z === 0) return null;
-        // At least one must have a non-trivial magnitude
-        const mag = Math.abs(x) + Math.abs(y) + Math.abs(z);
-        if (mag < 1e-15) return null;
-
-        return { x, y, z };
     }
 
     /**
