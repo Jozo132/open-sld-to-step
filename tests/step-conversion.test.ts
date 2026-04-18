@@ -100,6 +100,17 @@ type TestConeParams = {
     halfAngle: number;
 };
 
+type TestSphereParams = {
+    origin: { x: number; y: number; z: number };
+    radius: number;
+};
+
+type TestCylinderParams = {
+    origin: { x: number; y: number; z: number };
+    axis: { x: number; y: number; z: number };
+    radius: number;
+};
+
 function canonicalizeTestCone(params: TestConeParams): {
     apex: { x: number; y: number; z: number };
     axis: { x: number; y: number; z: number };
@@ -148,6 +159,53 @@ function coneMatchesCanonical(
         Math.abs(actualCanonical.apex.z - expectedCanonical.apex.z) < positionTol &&
         Math.abs(Math.abs(axisDot) - 1) < 0.01 &&
         Math.abs(actualCanonical.halfAngle - expectedCanonical.halfAngle) < angleTol;
+}
+
+function sphereMatches(
+    actual: TestSphereParams,
+    expected: TestSphereParams,
+    positionTol = 0.1,
+    radiusTol = 0.05,
+): boolean {
+    return Math.abs(actual.origin.x - expected.origin.x) < positionTol &&
+        Math.abs(actual.origin.y - expected.origin.y) < positionTol &&
+        Math.abs(actual.origin.z - expected.origin.z) < positionTol &&
+        Math.abs(actual.radius - expected.radius) < radiusTol;
+}
+
+function cylinderMatches(
+    actual: TestCylinderParams,
+    expected: TestCylinderParams,
+    originTol = 0.1,
+    radiusTol = 0.05,
+): boolean {
+    const actualAxisLength = Math.hypot(actual.axis.x, actual.axis.y, actual.axis.z) || 1;
+    const expectedAxisLength = Math.hypot(expected.axis.x, expected.axis.y, expected.axis.z) || 1;
+    const actualAxis = {
+        x: actual.axis.x / actualAxisLength,
+        y: actual.axis.y / actualAxisLength,
+        z: actual.axis.z / actualAxisLength,
+    };
+    const expectedAxis = {
+        x: expected.axis.x / expectedAxisLength,
+        y: expected.axis.y / expectedAxisLength,
+        z: expected.axis.z / expectedAxisLength,
+    };
+    const axisDot =
+        actualAxis.x * expectedAxis.x +
+        actualAxis.y * expectedAxis.y +
+        actualAxis.z * expectedAxis.z;
+    if (Math.abs(Math.abs(axisDot) - 1) >= 0.01) return false;
+    if (Math.abs(actual.radius - expected.radius) >= radiusTol) return false;
+
+    const dx = actual.origin.x - expected.origin.x;
+    const dy = actual.origin.y - expected.origin.y;
+    const dz = actual.origin.z - expected.origin.z;
+    const proj = dx * expectedAxis.x + dy * expectedAxis.y + dz * expectedAxis.z;
+    const px = dx - proj * expectedAxis.x;
+    const py = dy - proj * expectedAxis.y;
+    const pz = dz - proj * expectedAxis.z;
+    return Math.sqrt(px * px + py * py + pz * pz) < originTol;
 }
 
 // ── ParasolidParser unit tests ──────────────────────────────────────────────
@@ -1958,6 +2016,60 @@ describe('ParasolidParser', () => {
         expect(edges.filter(edge => combined.has(edge.geometryLikeId)).length).toBe(330);
     });
 
+    it('recovers the CTC_02 face-linked slot-6 10mm cylinder from a short type-31 wrapper', () => {
+        if (!ctc02Path) return;
+
+        const buf = readFileSync(ctc02Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasFaceLinkedCylinder = model.surfaces
+            .filter(surface => surface.surfaceType === 'cylinder')
+            .some(surface => cylinderMatches(
+                surface.params as TestCylinderParams,
+                {
+                    origin: { x: -183.664, y: 710.336, z: -38.4279 },
+                    axis: { x: -0.034861, y: 0.0469782, z: 0.998287 },
+                    radius: 10,
+                },
+                0.2,
+                0.05,
+            ));
+
+        expect(hasFaceLinkedCylinder).toBe(true);
+    });
+
+    it('recovers the CTC_05 face-linked slot-6 6.35mm cylinder from a short type-31 wrapper', () => {
+        if (!ctc05Path) return;
+
+        const buf = readFileSync(ctc05Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+
+        const hasFaceLinkedCylinder = model.surfaces
+            .filter(surface => surface.surfaceType === 'cylinder')
+            .some(surface => cylinderMatches(
+                surface.params as TestCylinderParams,
+                {
+                    origin: { x: 139.266, y: -76.2, z: 31.75 },
+                    axis: { x: 0, y: 0, z: 1 },
+                    radius: 6.35,
+                },
+                0.2,
+                0.05,
+            ));
+
+        expect(hasFaceLinkedCylinder).toBe(true);
+    });
+
     it('finds entity classes in a real transmit file', () => {
         if (!hasSamples) return;
         const buf = readFileSync(sampleFiles[0]);
@@ -2424,6 +2536,35 @@ describe('ParasolidParser', () => {
             .some(surface => coneMatchesCanonical(surface.params as TestConeParams, expected, positionTol, 0.02)));
 
         expect(hasRepresentativeCones).toBe(true);
+    });
+
+    it('recovers representative sphere surfaces from multi-axis raw cylinder clusters', () => {
+        if (!ftc07Path || !ctc02Path) return;
+
+        const ftc07Extraction = SldprtContainerParser.extractParasolid(readFileSync(ftc07Path));
+        const ctc02Extraction = SldprtContainerParser.extractParasolid(readFileSync(ctc02Path));
+        expect(ftc07Extraction).not.toBeNull();
+        expect(ctc02Extraction).not.toBeNull();
+        if (!ftc07Extraction || !ctc02Extraction) return;
+
+        const ftc07Model = new ParasolidParser(ftc07Extraction.data).parse();
+        const ctc02Model = new ParasolidParser(ctc02Extraction.data).parse();
+
+        const ftc07HasRepresentativeSphere = ftc07Model.surfaces
+            .filter(surface => surface.surfaceType === 'sphere')
+            .some(surface => sphereMatches(surface.params as TestSphereParams, {
+                origin: { x: -147.3, y: -117.6, z: 102.8 },
+                radius: 3.048,
+            }, 0.2, 0.02));
+        const ctc02HasRepresentativeSphere = ctc02Model.surfaces
+            .filter(surface => surface.surfaceType === 'sphere')
+            .some(surface => sphereMatches(surface.params as TestSphereParams, {
+                origin: { x: 214.3, y: 35.7, z: -305.0 },
+                radius: 25.0,
+            }, 0.2, 0.02));
+
+        expect(ftc07HasRepresentativeSphere).toBe(true);
+        expect(ctc02HasRepresentativeSphere).toBe(true);
     });
 
     it('does not keep denormalized FTC_07 tiny-radius surfaces or circles', () => {

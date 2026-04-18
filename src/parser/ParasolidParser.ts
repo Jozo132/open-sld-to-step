@@ -1031,6 +1031,121 @@ export class ParasolidParser {
         return results;
     }
 
+    private static geometryLikePayloadStartOffset(record: PsDirectGeometryLikeRecord): number {
+        return 'trailer' in record ? record.offset + 20 : record.offset + 19;
+    }
+
+    private static readDirectGeometryLeadingDoubles(
+        buf: Buffer,
+        record: PsDirectGeometryLikeRecord,
+        payloadBytes: number,
+        limit = 11,
+    ): number[] {
+        const values: number[] = [];
+        const start = ParasolidParser.geometryLikePayloadStartOffset(record);
+        const end = Math.min(start + payloadBytes, start + limit * 8);
+
+        for (let offset = start; offset + 8 <= end; offset += 8) {
+            const value = buf.readDoubleBE(offset);
+            if (!isFinite(value) || Math.abs(value) > 1e6) break;
+            values.push(value);
+        }
+
+        return values;
+    }
+
+    private static decodeFaceLinkedType31Cylinder(
+        buf: Buffer,
+        record: PsDirectGeometryLikeRecord,
+        payloadBytes: number,
+    ): PsSurface | null {
+        if (payloadBytes < 80 || payloadBytes > 160) return null;
+
+        const floats = ParasolidParser.readDirectGeometryLeadingDoubles(buf, record, payloadBytes, 11);
+        if (floats.length < 10) return null;
+
+        const origin: PsPoint = { x: floats[0], y: floats[1], z: floats[2] };
+        const axis: PsPoint = { x: floats[3], y: floats[4], z: floats[5] };
+        const refdir: PsPoint = { x: floats[6], y: floats[7], z: floats[8] };
+        const axisMag = Math.sqrt(axis.x * axis.x + axis.y * axis.y + axis.z * axis.z);
+        const refdirMag = Math.sqrt(refdir.x * refdir.x + refdir.y * refdir.y + refdir.z * refdir.z);
+        const radius = floats[9];
+        const semiAngle = floats[10] ?? 0;
+
+        if (axisMag < 0.8 || axisMag > 1.2) return null;
+        if (refdirMag < 0.8 || refdirMag > 1.2) return null;
+        if (radius <= ParasolidParser.RAW_SURFACE_RADIUS_MIN || radius >= 1) return null;
+        if (Math.abs(semiAngle) >= ParasolidParser.RAW_CONE_SEMIANGLE_MIN) return null;
+
+        const normalizedAxis = ParasolidParser.normalizeDirection(axis);
+        const normalizedRefdir = ParasolidParser.normalizeDirection(refdir);
+        const ortho = normalizedAxis.x * normalizedRefdir.x +
+            normalizedAxis.y * normalizedRefdir.y +
+            normalizedAxis.z * normalizedRefdir.z;
+        if (Math.abs(ortho) > 0.15) return null;
+
+        return {
+            id: 0,
+            surfaceType: 'cylinder',
+            params: {
+                origin: {
+                    x: origin.x * PS_TO_MM,
+                    y: origin.y * PS_TO_MM,
+                    z: origin.z * PS_TO_MM,
+                },
+                axis: normalizedAxis,
+                radius: radius * PS_TO_MM,
+            },
+        };
+    }
+
+    private extractFaceLinkedType31WrapperSurfaces(): PsSurface[] {
+        const direct = [
+            ...this.parseCompactGeometryLikeRecords(),
+            ...this.parsePackedGeometryLikeRecords(),
+        ].sort((left, right) => left.offset - right.offset);
+        const directById = new Map<number, { record: PsDirectGeometryLikeRecord; payloadBytes: number }>();
+
+        for (let index = 0; index < direct.length; index++) {
+            const record = direct[index];
+            if (record.type !== ENTITY_BSPLINE) continue;
+
+            const nextOffset = direct[index + 1]?.offset ?? this.buf.length;
+            const payloadBytes = Math.max(0, nextOffset - ParasolidParser.geometryLikePayloadStartOffset(record));
+            directById.set(record.id, { record, payloadBytes });
+        }
+
+        if (directById.size === 0) return [];
+
+        const surfaces: PsSurface[] = [];
+        const seenRecordIds = new Set<number>();
+        const faceSurfaceSlotOffset = 10 + 6 * 2;
+
+        for (let offset = 0; offset + faceSurfaceSlotOffset + 2 <= this.buf.length; offset++) {
+            const type = this.buf.readUInt16BE(offset);
+            if (type !== ENTITY_FACE) continue;
+
+            const id = this.buf.readUInt16BE(offset + 2);
+            const zero = this.buf.readUInt16BE(offset + 4);
+            const one = this.buf.readUInt16BE(offset + 8);
+            if (zero !== 0 || one !== 1 || id < 1 || id > 11000) continue;
+
+            const directId = this.buf.readUInt16BE(offset + faceSurfaceSlotOffset);
+            if (seenRecordIds.has(directId)) continue;
+
+            const entry = directById.get(directId);
+            if (!entry) continue;
+
+            const surface = ParasolidParser.decodeFaceLinkedType31Cylinder(this.buf, entry.record, entry.payloadBytes);
+            if (!surface) continue;
+
+            seenRecordIds.add(directId);
+            surfaces.push(surface);
+        }
+
+        return surfaces;
+    }
+
     /**
      * Extract cylinder/cone surfaces from type-0x1F (SURFACE/BSPLINE) entities.
      * These are the reliably identifiable surfaces from the binary stream.
@@ -1154,6 +1269,12 @@ export class ParasolidParser {
                     });
                 }
             }
+        }
+
+        for (const surface of this.extractFaceLinkedType31WrapperSurfaces()) {
+            if (surfaces.some(existing => ParasolidParser.surfacesMatch(existing, surface))) continue;
+            surface.id = nextId++;
+            surfaces.push(surface);
         }
 
         return surfaces;
@@ -1375,6 +1496,7 @@ export class ParasolidParser {
     private static readonly CONE_SECTION_RADIUS_TOL = 0.1; // mm — coaxial section match
     private static readonly RAW_CONE_SEMIANGLE_MIN = 0.01; // rad — preserve 1°/2° cones, drop cylinder noise
     private static readonly VERTEX_CYL_TOL = 0.5;   // mm — vertex on cylinder
+    private static readonly VERTEX_SPHERE_TOL = 0.5; // mm — vertex on sphere
     private static readonly VERTEX_TORUS_TOL = 0.5; // mm — vertex on torus tube
     private static readonly PLANE_HOLE_LARGE_RADIUS_MIN = 8; // mm — large planar holes need more support to avoid false positives
     private static readonly PLANE_HOLE_MIN_SUPPORT = 4; // vertices — preserve small holes but reject weak large-radius candidates
@@ -1460,6 +1582,13 @@ export class ParasolidParser {
     private static readonly INFERRED_COMPACT_SHALLOW_CONE_COMPANION_GAP_MAX = 130;
     private static readonly INFERRED_COMPACT_SHALLOW_CONE_COMPANION_RADIUS_MIN = 6.5;
     private static readonly INFERRED_COMPACT_SHALLOW_CONE_COMPANION_RADIUS_MAX = 7.8;
+    private static readonly INFERRED_SPHERE_RADIUS_MIN = 0.5;
+    private static readonly INFERRED_SPHERE_RADIUS_MAX = 30;
+    private static readonly INFERRED_SPHERE_ORIGIN_TOL = 0.25;
+    private static readonly INFERRED_SPHERE_RADIUS_TOL = 0.1;
+    private static readonly INFERRED_SPHERE_AXIS_DOT_MAX = 0.98;
+    private static readonly INFERRED_SPHERE_MIN_AXIS_VARIANTS = 2;
+    private static readonly INFERRED_SPHERE_MIN_SUPPORT = 2;
 
     /**
      * Maximum PCA eigenvalue ratio (λ1/λ2) for a candidate plane to be
@@ -1483,77 +1612,12 @@ export class ParasolidParser {
         const unique: PsSurface[] = [];
 
         for (const surf of surfaces) {
-            const p = surf.params as Record<string, unknown>;
             let isDup = false;
 
             for (const existing of unique) {
-                if (existing.surfaceType !== surf.surfaceType) continue;
-                const ep = existing.params as Record<string, unknown>;
-
-                if (surf.surfaceType === 'plane') {
-                    const n1 = p.normal as PsPoint;
-                    const n2 = ep.normal as PsPoint;
-                    const dot = n1.x * n2.x + n1.y * n2.y + n1.z * n2.z;
-                    if (Math.abs(Math.abs(dot) - 1) >= ParasolidParser.NORMAL_TOL) continue;
-                    const o1 = p.origin as PsPoint;
-                    const o2 = ep.origin as PsPoint;
-                    const d1 = n1.x * o1.x + n1.y * o1.y + n1.z * o1.z;
-                    const d2 = n2.x * o2.x + n2.y * o2.y + n2.z * o2.z;
-                    const sign = dot > 0 ? 1 : -1;
-                    if (Math.abs(d1 - sign * d2) < ParasolidParser.PLANE_DIST_TOL) {
-                        isDup = true;
-                        break;
-                    }
-                } else if (surf.surfaceType === 'cylinder') {
-                    const a1 = p.axis as PsPoint;
-                    const a2 = ep.axis as PsPoint;
-                    const dot = a1.x * a2.x + a1.y * a2.y + a1.z * a2.z;
-                    if (Math.abs(Math.abs(dot) - 1) >= ParasolidParser.CYL_AXIS_TOL) continue;
-                    const r1 = p.radius as number;
-                    const r2 = ep.radius as number;
-                    if (Math.abs(r1 - r2) >= ParasolidParser.CYL_RADIUS_TOL) continue;
-                    // Check colinearity of origins (perpendicular distance to axis line)
-                    const o1 = p.origin as PsPoint;
-                    const o2 = ep.origin as PsPoint;
-                    const dx = o1.x - o2.x, dy = o1.y - o2.y, dz = o1.z - o2.z;
-                    const proj = dx * a2.x + dy * a2.y + dz * a2.z;
-                    const px = dx - proj * a2.x, py = dy - proj * a2.y, pz = dz - proj * a2.z;
-                    if (Math.sqrt(px * px + py * py + pz * pz) < ParasolidParser.CYL_ORIGIN_TOL) {
-                        isDup = true;
-                        break;
-                    }
-                } else if (surf.surfaceType === 'cone') {
-                    const a1 = p.axis as PsPoint;
-                    const a2 = ep.axis as PsPoint;
-                    const dot = a1.x * a2.x + a1.y * a2.y + a1.z * a2.z;
-                    if (Math.abs(Math.abs(dot) - 1) >= ParasolidParser.CYL_AXIS_TOL) continue;
-
-                    const ha1 = ParasolidParser.coneHalfAngleRadians(p.halfAngle as number);
-                    const ha2 = ParasolidParser.coneHalfAngleRadians(ep.halfAngle as number);
-                    if (Math.abs(ha1 - ha2) >= ParasolidParser.INFERRED_APEX_CONE_ANGLE_TOL) continue;
-
-                    const apex1 = ParasolidParser.coneApex(
-                        p.origin as PsPoint,
-                        a1,
-                        p.radius as number,
-                        p.halfAngle as number,
-                    );
-                    const apex2 = ParasolidParser.coneApex(
-                        ep.origin as PsPoint,
-                        a2,
-                        ep.radius as number,
-                        ep.halfAngle as number,
-                    );
-                    if (apex1 === null || apex2 === null) continue;
-
-                    const dx = apex1.x - apex2.x;
-                    const dy = apex1.y - apex2.y;
-                    const dz = apex1.z - apex2.z;
-                    if (Math.sqrt(dx * dx + dy * dy + dz * dz) < ParasolidParser.CYL_ORIGIN_TOL) {
-                        isDup = true;
-                        break;
-                    }
-                }
+                if (!ParasolidParser.surfacesMatch(existing, surf)) continue;
+                isDup = true;
+                break;
             }
 
             if (!isDup) unique.push(surf);
@@ -1613,6 +1677,17 @@ export class ParasolidParser {
                     const px = dx - along * axis.x, py = dy - along * axis.y, pz = dz - along * axis.z;
                     const radDist = Math.sqrt(px * px + py * py + pz * pz);
                     if (Math.abs(radDist - expectedR) < ParasolidParser.VERTEX_CYL_TOL) indices.push(i);
+                }
+            } else if (surf.surfaceType === 'sphere') {
+                const origin = p.origin as PsPoint;
+                const radius = p.radius as number;
+                for (let i = 0; i < vertices.length; i++) {
+                    const v = vertices[i].position;
+                    const dx = v.x - origin.x;
+                    const dy = v.y - origin.y;
+                    const dz = v.z - origin.z;
+                    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                    if (Math.abs(dist - radius) < ParasolidParser.VERTEX_SPHERE_TOL) indices.push(i);
                 }
             } else if (surf.surfaceType === 'torus') {
                 const origin = p.origin as PsPoint;
@@ -2134,7 +2209,6 @@ export class ParasolidParser {
                 outputAngle: 45,
             };
         }
-
         if (gap >= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_GAP_MIN &&
             gap <= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_GAP_MAX &&
             smallRadius >= ParasolidParser.INFERRED_ZERO_SUPPORT_COUNTERSINK_SMALL_RADIUS_MIN &&
@@ -2188,6 +2262,87 @@ export class ParasolidParser {
         }
 
         return null;
+    }
+
+    private static surfacesMatch(left: PsSurface, right: PsSurface): boolean {
+        if (left.surfaceType !== right.surfaceType) return false;
+
+        const leftParams = left.params as Record<string, unknown>;
+        const rightParams = right.params as Record<string, unknown>;
+
+        if (left.surfaceType === 'plane') {
+            const leftNormal = leftParams.normal as PsPoint;
+            const rightNormal = rightParams.normal as PsPoint;
+            const normalDot = leftNormal.x * rightNormal.x + leftNormal.y * rightNormal.y + leftNormal.z * rightNormal.z;
+            if (Math.abs(Math.abs(normalDot) - 1) >= ParasolidParser.NORMAL_TOL) return false;
+
+            const leftOrigin = leftParams.origin as PsPoint;
+            const rightOrigin = rightParams.origin as PsPoint;
+            const leftDistance = leftNormal.x * leftOrigin.x + leftNormal.y * leftOrigin.y + leftNormal.z * leftOrigin.z;
+            const rightDistance = rightNormal.x * rightOrigin.x + rightNormal.y * rightOrigin.y + rightNormal.z * rightOrigin.z;
+            const sign = normalDot > 0 ? 1 : -1;
+            return Math.abs(leftDistance - sign * rightDistance) < ParasolidParser.PLANE_DIST_TOL;
+        }
+
+        if (left.surfaceType === 'cylinder') {
+            const leftAxis = leftParams.axis as PsPoint;
+            const rightAxis = rightParams.axis as PsPoint;
+            const axisDot = leftAxis.x * rightAxis.x + leftAxis.y * rightAxis.y + leftAxis.z * rightAxis.z;
+            if (Math.abs(Math.abs(axisDot) - 1) >= ParasolidParser.CYL_AXIS_TOL) return false;
+
+            const leftRadius = leftParams.radius as number;
+            const rightRadius = rightParams.radius as number;
+            if (Math.abs(leftRadius - rightRadius) >= ParasolidParser.CYL_RADIUS_TOL) return false;
+
+            const leftOrigin = leftParams.origin as PsPoint;
+            const rightOrigin = rightParams.origin as PsPoint;
+            return ParasolidParser.axisLineDistance(leftOrigin, rightOrigin, rightAxis) < ParasolidParser.CYL_ORIGIN_TOL;
+        }
+
+        if (left.surfaceType === 'cone') {
+            const leftAxis = leftParams.axis as PsPoint;
+            const rightAxis = rightParams.axis as PsPoint;
+            const axisDot = leftAxis.x * rightAxis.x + leftAxis.y * rightAxis.y + leftAxis.z * rightAxis.z;
+            if (Math.abs(Math.abs(axisDot) - 1) >= ParasolidParser.CYL_AXIS_TOL) return false;
+
+            const leftHalfAngle = ParasolidParser.coneHalfAngleRadians(leftParams.halfAngle as number);
+            const rightHalfAngle = ParasolidParser.coneHalfAngleRadians(rightParams.halfAngle as number);
+            if (Math.abs(leftHalfAngle - rightHalfAngle) >= ParasolidParser.INFERRED_APEX_CONE_ANGLE_TOL) return false;
+
+            const leftApex = ParasolidParser.coneApex(
+                leftParams.origin as PsPoint,
+                leftAxis,
+                leftParams.radius as number,
+                leftParams.halfAngle as number,
+            );
+            const rightApex = ParasolidParser.coneApex(
+                rightParams.origin as PsPoint,
+                rightAxis,
+                rightParams.radius as number,
+                rightParams.halfAngle as number,
+            );
+            if (leftApex === null || rightApex === null) return false;
+
+            const dx = leftApex.x - rightApex.x;
+            const dy = leftApex.y - rightApex.y;
+            const dz = leftApex.z - rightApex.z;
+            return Math.sqrt(dx * dx + dy * dy + dz * dz) < ParasolidParser.CYL_ORIGIN_TOL;
+        }
+
+        if (left.surfaceType === 'sphere') {
+            const leftOrigin = leftParams.origin as PsPoint;
+            const rightOrigin = rightParams.origin as PsPoint;
+            const leftRadius = leftParams.radius as number;
+            const rightRadius = rightParams.radius as number;
+            if (Math.abs(leftRadius - rightRadius) >= ParasolidParser.INFERRED_SPHERE_RADIUS_TOL) return false;
+
+            const dx = leftOrigin.x - rightOrigin.x;
+            const dy = leftOrigin.y - rightOrigin.y;
+            const dz = leftOrigin.z - rightOrigin.z;
+            return Math.sqrt(dx * dx + dy * dy + dz * dz) < ParasolidParser.INFERRED_SPHERE_ORIGIN_TOL;
+        }
+
+        return false;
     }
 
     /**
@@ -2668,6 +2823,138 @@ export class ParasolidParser {
                     axis: companionAxis,
                     radius: companionRadius,
                     halfAngle: cone.params.halfAngle,
+                },
+            });
+            nextId++;
+            seen.add(key);
+        }
+
+        return inferred;
+    }
+
+    /**
+     * Recover sphere surfaces from multi-axis raw cylinder clusters that share
+     * the same center and radius.
+     *
+     * Clean-room observation from the public NIST samples: many reference
+     * spheres already appear in the extracted raw surface inventory as two or
+     * more coincident cylinders with the same origin/radius but different axis
+     * directions. Reinterpreting those clustered sections as a sphere recovers
+     * the missing surface type without disturbing the existing cylinder faces.
+     */
+    private inferSpheresFromCylinderClusters(
+        rawSurfaces: PsSurface[],
+        vertices: PsVertex[],
+    ): PsSurface[] {
+        const cylinders = rawSurfaces.filter((surface): surface is PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        } => surface.surfaceType === 'cylinder').filter((surface) => {
+            return surface.params.radius >= ParasolidParser.INFERRED_SPHERE_RADIUS_MIN &&
+                surface.params.radius <= ParasolidParser.INFERRED_SPHERE_RADIUS_MAX;
+        });
+        if (cylinders.length < ParasolidParser.INFERRED_SPHERE_MIN_AXIS_VARIANTS) return [];
+
+        const groups: Array<{
+            origin: PsPoint;
+            radius: number;
+            cylinders: Array<PsSurface & {
+                surfaceType: 'cylinder';
+                params: { origin: PsPoint; axis: PsPoint; radius: number };
+            }>;
+        }> = [];
+
+        for (const cylinder of cylinders) {
+            const group = groups.find((candidate) => {
+                const dx = candidate.origin.x - cylinder.params.origin.x;
+                const dy = candidate.origin.y - cylinder.params.origin.y;
+                const dz = candidate.origin.z - cylinder.params.origin.z;
+                return Math.sqrt(dx * dx + dy * dy + dz * dz) <= ParasolidParser.INFERRED_SPHERE_ORIGIN_TOL &&
+                    Math.abs(candidate.radius - cylinder.params.radius) <= ParasolidParser.INFERRED_SPHERE_RADIUS_TOL;
+            });
+
+            if (group) {
+                group.cylinders.push(cylinder);
+                const count = group.cylinders.length;
+                group.origin = {
+                    x: (group.origin.x * (count - 1) + cylinder.params.origin.x) / count,
+                    y: (group.origin.y * (count - 1) + cylinder.params.origin.y) / count,
+                    z: (group.origin.z * (count - 1) + cylinder.params.origin.z) / count,
+                };
+                group.radius = (group.radius * (count - 1) + cylinder.params.radius) / count;
+            } else {
+                groups.push({
+                    origin: { ...cylinder.params.origin },
+                    radius: cylinder.params.radius,
+                    cylinders: [cylinder],
+                });
+            }
+        }
+
+        const sphereSupport = (origin: PsPoint, radius: number): number => {
+            let support = 0;
+            for (const vertex of vertices) {
+                const dx = vertex.position.x - origin.x;
+                const dy = vertex.position.y - origin.y;
+                const dz = vertex.position.z - origin.z;
+                const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                if (Math.abs(dist - radius) <= ParasolidParser.VERTEX_SPHERE_TOL) support++;
+            }
+            return support;
+        };
+
+        const canonicalizeAxis = (axis: PsPoint): PsPoint => {
+            const normalized = ParasolidParser.normalizeDirection(axis);
+            if (Math.abs(normalized.x) > 1e-9) {
+                return normalized.x < 0
+                    ? { x: -normalized.x, y: -normalized.y, z: -normalized.z }
+                    : normalized;
+            }
+            if (Math.abs(normalized.y) > 1e-9) {
+                return normalized.y < 0
+                    ? { x: -normalized.x, y: -normalized.y, z: -normalized.z }
+                    : normalized;
+            }
+            return normalized.z < 0
+                ? { x: -normalized.x, y: -normalized.y, z: -normalized.z }
+                : normalized;
+        };
+
+        const inferred: PsSurface[] = [];
+        const seen = new Set<string>();
+        let nextId = rawSurfaces.reduce((maxId, surface) => Math.max(maxId, surface.id), 0) + 1;
+
+        for (const group of groups) {
+            if (group.cylinders.length < ParasolidParser.INFERRED_SPHERE_MIN_AXIS_VARIANTS) continue;
+
+            const axisVariants: PsPoint[] = [];
+            for (const cylinder of group.cylinders) {
+                const axis = canonicalizeAxis(cylinder.params.axis);
+                const isDuplicate = axisVariants.some((existing) => {
+                    const dot = existing.x * axis.x + existing.y * axis.y + existing.z * axis.z;
+                    return Math.abs(dot) >= ParasolidParser.INFERRED_SPHERE_AXIS_DOT_MAX;
+                });
+                if (!isDuplicate) axisVariants.push(axis);
+            }
+            if (axisVariants.length < ParasolidParser.INFERRED_SPHERE_MIN_AXIS_VARIANTS) continue;
+
+            const support = sphereSupport(group.origin, group.radius);
+            if (support < ParasolidParser.INFERRED_SPHERE_MIN_SUPPORT) continue;
+
+            const key = [
+                group.origin.x.toFixed(3),
+                group.origin.y.toFixed(3),
+                group.origin.z.toFixed(3),
+                group.radius.toFixed(3),
+            ].join('|');
+            if (seen.has(key)) continue;
+
+            inferred.push({
+                id: nextId,
+                surfaceType: 'sphere',
+                params: {
+                    origin: { ...group.origin },
+                    radius: group.radius,
                 },
             });
             nextId++;
@@ -3985,6 +4272,7 @@ export class ParasolidParser {
             validatedSurfaces,
             vertices,
         );
+        const inferredSpheres = this.inferSpheresFromCylinderClusters(validatedSurfaces, vertices);
         const inferredCones = [
             ...apexCones,
             ...directDrillTipCones,
@@ -3993,7 +4281,7 @@ export class ParasolidParser {
             ...compactShallowCones,
             ...compactShallowConeCompanions,
         ];
-        const surfaces = this.deduplicateSurfaces([...mergedSurfaces, ...inferredCones]);
+        const surfaces = this.deduplicateSurfaces([...mergedSurfaces, ...inferredCones, ...inferredSpheres]);
 
         // Re-number deduplicated surfaces sequentially
         surfaces.forEach((s, i) => { s.id = i + 1; });
