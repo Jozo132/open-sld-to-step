@@ -33,6 +33,7 @@ import {
 } from './ParasolidParserConstants.js';
 import type {
     PointEdgeChainPosition,
+    PsBroadProfileSegmentRecord,
     PsCoedgeChain,
     PsCoedgeRecord,
     PsCompactGeometryLikeRecord,
@@ -59,9 +60,14 @@ import type {
     PsShellInlineContainerLink,
     PsShellInlineFaceAnchorRecord,
     PsShellInlineFaceRecord,
+    PsProfileWrapperFrameRecord,
+    PsProfileSkeletonComponent,
+    PsProfileWrapperRecord,
     PsTransmitHeader,
     RawEntity,
 } from './ParasolidParserTypes.js';
+
+const ENTITY_BROAD_PROFILE_SEGMENT = 0x85;
 
 export function parseHeader(buf: Buffer): PsTransmitHeader | null {
     if (buf.length < 20 || buf[0] !== 0x50 || buf[1] !== 0x53) return null;
@@ -864,6 +870,211 @@ export function parseAllGeometryLikeRecords(buf: Buffer): Array<PsDirectGeometry
     return [...records.values()];
 }
 
+export function parseBroadProfileSegmentRecords(buf: Buffer): PsBroadProfileSegmentRecord[] {
+    const broad = scanBroadEntityHeaders(buf, ENTITY_BROAD_PROFILE_SEGMENT);
+    if (broad.length === 0) return [];
+
+    const records: PsBroadProfileSegmentRecord[] = [];
+    for (let index = 0; index < broad.length; index++) {
+        const record = broad[index];
+        const nextOffset = broad[index + 1]?.offset ?? buf.length;
+        const window = buf.subarray(record.offset, nextOffset);
+        const segment = findBestSegmentRow(window);
+        if (!segment) continue;
+
+        records.push({
+            offset: record.offset,
+            type: record.type,
+            id: record.id,
+            refIds: record.refIds,
+            markerByte: segment.markerByte,
+            markerOffset: segment.markerOffset,
+            shift: segment.shift,
+            startPoint: segment.startPoint,
+            endPoint: segment.endPoint,
+            encodedLength: segment.encodedLength,
+            actualLength: segment.actualLength,
+            tailScalar: segment.tailScalar,
+        });
+    }
+
+    return records;
+}
+
+export function parseProfileWrapperRecords(buf: Buffer): PsProfileWrapperRecord[] {
+    const segments = new Map(parseBroadProfileSegmentRecords(buf).map((record) => [record.id, record]));
+    if (segments.size === 0) return [];
+
+    const direct = buildDirectGeometryWindowRecords(buf);
+    const wrappers: PsProfileWrapperRecord[] = [];
+
+    for (const record of direct) {
+        if (record.type !== ENTITY_SURFACE) continue;
+
+        const previousSegmentId = segments.has(record.refIds[2]) ? record.refIds[2] : null;
+        const nextSegmentId = segments.has(record.refIds[1]) ? record.refIds[1] : null;
+        if (previousSegmentId === null && nextSegmentId === null) continue;
+
+        const window = buf.subarray(record.offset, record.end);
+        const markerOffsets = findMarkerOffsets(window);
+        const primary = markerOffsets.length > 0
+            ? tryDecodePointTangentRow(window, markerOffsets[0], 1)
+            : null;
+
+        let duplicatedSegment: PsBroadProfileSegmentRecord | null = null;
+        let framePlacement: PsProfileWrapperFrameRecord | null = null;
+
+        for (const markerOffset of markerOffsets) {
+            for (let shift = 1; shift <= 8; shift++) {
+                if (!duplicatedSegment) {
+                    const segment = tryDecodeSegmentRow(window, markerOffset, shift);
+                    if (segment) {
+                        duplicatedSegment = {
+                            offset: record.offset,
+                            type: record.type,
+                            id: record.id,
+                            refIds: record.refIds,
+                            markerByte: segment.markerByte,
+                            markerOffset: segment.markerOffset,
+                            shift: segment.shift,
+                            startPoint: segment.startPoint,
+                            endPoint: segment.endPoint,
+                            encodedLength: segment.encodedLength,
+                            actualLength: segment.actualLength,
+                            tailScalar: segment.tailScalar,
+                        };
+                    }
+                }
+
+                if (!framePlacement) {
+                    framePlacement = tryDecodeFramePlacementRow(window, markerOffset, shift);
+                }
+
+                if (duplicatedSegment && framePlacement) break;
+            }
+            if (duplicatedSegment && framePlacement) break;
+        }
+
+        wrappers.push({
+            offset: record.offset,
+            type: record.type,
+            id: record.id,
+            flags: record.flags,
+            payloadBytes: record.payloadBytes,
+            refIds: record.refIds,
+            previousSegmentId,
+            nextSegmentId,
+            primaryMarkerByte: primary?.markerByte ?? null,
+            primaryMarkerOffset: primary?.markerOffset ?? null,
+            primaryShift: primary?.shift ?? null,
+            primaryPoint: primary?.point ?? null,
+            primaryDirection: primary?.direction ?? null,
+            duplicatedSegment,
+            framePlacement,
+        });
+    }
+
+    return wrappers;
+}
+
+export function parseProfileSkeletonComponents(buf: Buffer): PsProfileSkeletonComponent[] {
+    const segments = parseBroadProfileSegmentRecords(buf).map((record) => ({
+        ...record,
+        direction2D: normalize({
+            x: record.endPoint.x - record.startPoint.x,
+            y: 0,
+            z: record.endPoint.z - record.startPoint.z,
+        }),
+    }));
+    if (segments.length === 0) return [];
+
+    type SkeletonSegment = (typeof segments)[number];
+
+    const wrappers = parseProfileWrapperRecords(buf).filter((record) => record.primaryPoint && record.primaryDirection);
+    const unused = new Map(segments.map((record) => [record.id, record]));
+    const components: PsProfileSkeletonComponent[] = [];
+
+    while (unused.size > 0) {
+        const seed = unused.values().next().value;
+        if (!seed) break;
+        unused.delete(seed.id);
+        const ordered: SkeletonSegment[] = [seed];
+
+        let extended = true;
+        while (extended) {
+            extended = false;
+            const head = ordered[0];
+            const tail = ordered[ordered.length - 1];
+            if (!head || !tail) break;
+            for (const candidate of [...unused.values()]) {
+                if (distance(candidate.endPoint, head.startPoint) <= 0.05) {
+                    ordered.unshift(candidate);
+                    unused.delete(candidate.id);
+                    extended = true;
+                    break;
+                }
+                if (distance(tail.endPoint, candidate.startPoint) <= 0.05) {
+                    ordered.push(candidate);
+                    unused.delete(candidate.id);
+                    extended = true;
+                    break;
+                }
+            }
+        }
+
+        const head = ordered[0];
+        const tail = ordered[ordered.length - 1];
+        if (!head || !tail) continue;
+        const closed = distance(head.startPoint, tail.endPoint) <= 0.05;
+
+        let closureWrapperId: number | null = null;
+        let closurePoint: PsPoint | null = null;
+        let closureDirection: PsPoint | null = null;
+        let closureLength: number | null = null;
+        const vertexPoints = ordered.map((record) => record.startPoint);
+
+        if (!closed) {
+            const closureWrapper = wrappers.find((record) => {
+                if (record.nextSegmentId !== tail.id) return false;
+                if (!record.primaryPoint || !record.primaryDirection) return false;
+                if (distance(record.primaryPoint, tail.endPoint) > 0.05) return false;
+
+                const missingVector = normalize({
+                    x: head.startPoint.x - tail.endPoint.x,
+                    y: 0,
+                    z: head.startPoint.z - tail.endPoint.z,
+                });
+                const wrapperVector = normalize({
+                    x: record.primaryDirection.x,
+                    y: 0,
+                    z: record.primaryDirection.z,
+                });
+                return directionDistance(missingVector, wrapperVector) <= 0.01;
+            });
+
+            if (closureWrapper?.primaryPoint && closureWrapper.primaryDirection) {
+                closureWrapperId = closureWrapper.id;
+                closurePoint = closureWrapper.primaryPoint;
+                closureDirection = closureWrapper.primaryDirection;
+                closureLength = distance(tail.endPoint, head.startPoint);
+                vertexPoints.unshift(closureWrapper.primaryPoint);
+            }
+        }
+
+        components.push({
+            segmentIds: ordered.map((record) => record.id),
+            vertexPoints,
+            closed,
+            closureWrapperId,
+            closurePoint,
+            closureDirection,
+            closureLength,
+        });
+    }
+
+    return components.sort((left, right) => right.segmentIds.length - left.segmentIds.length || left.segmentIds[0] - right.segmentIds[0]);
+}
+
 export function parseGapPointRecords(buf: Buffer): PsGapPointRecord[] {
     const records: PsGapPointRecord[] = [];
     for (const sentinelOffset of findEightByteSentinelOffsets(buf)) {
@@ -1047,6 +1258,233 @@ function parseDirectGeometryLikeRecords(buf: Buffer): PsDirectGeometryLikeRecord
         if (!records.has(record.id)) records.set(record.id, record);
     }
     return [...records.values()];
+}
+
+function buildDirectGeometryWindowRecords(buf: Buffer): Array<PsDirectGeometryLikeRecord & { end: number; payloadBytes: number }> {
+    const direct = parseDirectGeometryLikeRecords(buf)
+        .sort((left, right) => left.offset - right.offset || left.id - right.id);
+
+    return direct.map((record, index) => {
+        const payloadStart = 'trailer' in record
+            ? record.offset + 20
+            : record.offset + 19;
+        const end = direct[index + 1]?.offset ?? buf.length;
+        return {
+            ...record,
+            end,
+            payloadBytes: Math.max(0, end - payloadStart),
+        };
+    });
+}
+
+function scanBroadEntityHeaders(
+    buf: Buffer,
+    targetType: number | null = null,
+): Array<{ offset: number; type: number; id: number; refIds: [number, number, number, number] }> {
+    const records = new Map<number, { offset: number; type: number; id: number; refIds: [number, number, number, number] }>();
+
+    for (let offset = 0; offset + 18 <= buf.length; offset++) {
+        const type = buf.readUInt16BE(offset);
+        const id = buf.readUInt16BE(offset + 2);
+        const zero = buf.readUInt16BE(offset + 4);
+        const one = buf.readUInt16BE(offset + 8);
+        if (zero !== 0 || one !== 1) continue;
+        if (targetType !== null && type !== targetType) continue;
+        if (type < 1 || type > 200 || id < 1 || id > 11000) continue;
+        if (records.has(id)) continue;
+
+        records.set(id, {
+            offset,
+            type,
+            id,
+            refIds: [
+                buf.readUInt16BE(offset + 10),
+                buf.readUInt16BE(offset + 12),
+                buf.readUInt16BE(offset + 14),
+                buf.readUInt16BE(offset + 16),
+            ],
+        });
+    }
+
+    return [...records.values()].sort((left, right) => left.offset - right.offset || left.id - right.id);
+}
+
+function findMarkerOffsets(window: Buffer): number[] {
+    const offsets: number[] = [];
+    for (let offset = 0; offset < window.length; offset++) {
+        const markerByte = window[offset];
+        if (markerByte === 0x2b || markerByte === 0x2d) offsets.push(offset);
+    }
+    return offsets;
+}
+
+function readMarkerFloats(window: Buffer, markerOffset: number, shift: number): number[] {
+    const floats: number[] = [];
+    for (let offset = markerOffset + shift; offset + 8 <= window.length; offset += 8) {
+        const value = window.readDoubleBE(offset);
+        if (!Number.isFinite(value) || Math.abs(value) > 1e6) break;
+        floats.push(value);
+    }
+    return floats;
+}
+
+function mmPointFromFloats(floats: number[], startIndex: number): PsPoint {
+    return {
+        x: floats[startIndex] * PS_TO_MM,
+        y: floats[startIndex + 1] * PS_TO_MM,
+        z: floats[startIndex + 2] * PS_TO_MM,
+    };
+}
+
+function distance(left: PsPoint, right: PsPoint): number {
+    return Math.hypot(left.x - right.x, left.y - right.y, left.z - right.z);
+}
+
+function magnitude(vector: PsPoint): number {
+    return Math.hypot(vector.x, vector.y, vector.z);
+}
+
+function normalize(vector: PsPoint): PsPoint {
+    const length = magnitude(vector) || 1;
+    return {
+        x: vector.x / length,
+        y: vector.y / length,
+        z: vector.z / length,
+    };
+}
+
+function directionDistance(left: PsPoint, right: PsPoint): number {
+    return Math.hypot(left.x - right.x, left.y - right.y, left.z - right.z);
+}
+
+function dot(left: PsPoint, right: PsPoint): number {
+    return left.x * right.x + left.y * right.y + left.z * right.z;
+}
+
+function tryDecodePointTangentRow(
+    window: Buffer,
+    markerOffset: number,
+    shift: number,
+): {
+    markerByte: number;
+    markerOffset: number;
+    shift: number;
+    point: PsPoint;
+    direction: PsPoint;
+} | null {
+    const floats = readMarkerFloats(window, markerOffset, shift);
+    if (floats.length < 6) return null;
+
+    const direction = {
+        x: floats[3],
+        y: floats[4],
+        z: floats[5],
+    };
+    const length = magnitude(direction);
+    if (length < 0.8 || length > 1.2) return null;
+
+    return {
+        markerByte: window[markerOffset],
+        markerOffset,
+        shift,
+        point: mmPointFromFloats(floats, 0),
+        direction: normalize(direction),
+    };
+}
+
+function tryDecodeSegmentRow(
+    window: Buffer,
+    markerOffset: number,
+    shift: number,
+): {
+    markerByte: number;
+    markerOffset: number;
+    shift: number;
+    startPoint: PsPoint;
+    endPoint: PsPoint;
+    encodedLength: number;
+    actualLength: number;
+    tailScalar: number;
+} | null {
+    const floats = readMarkerFloats(window, markerOffset, shift);
+    if (floats.length < 9) return null;
+
+    const startPoint = mmPointFromFloats(floats, 0);
+    const endPoint = mmPointFromFloats(floats, 3);
+    const zeroish = Math.abs((floats[6] ?? 0) * PS_TO_MM);
+    const encodedLength = (floats[7] ?? 0) * PS_TO_MM;
+    const actualLength = distance(startPoint, endPoint);
+    if (zeroish > 0.1) return null;
+    if (!Number.isFinite(encodedLength) || encodedLength <= 1) return null;
+    if (Math.abs(actualLength - encodedLength) > 0.05) return null;
+
+    return {
+        markerByte: window[markerOffset],
+        markerOffset,
+        shift,
+        startPoint,
+        endPoint,
+        encodedLength,
+        actualLength,
+        tailScalar: floats[8] ?? 0,
+    };
+}
+
+function findBestSegmentRow(window: Buffer): ReturnType<typeof tryDecodeSegmentRow> {
+    let best: ReturnType<typeof tryDecodeSegmentRow> = null;
+
+    for (const markerOffset of findMarkerOffsets(window)) {
+        for (let shift = 1; shift <= 8; shift++) {
+            const candidate = tryDecodeSegmentRow(window, markerOffset, shift);
+            if (!candidate) continue;
+
+            if (!best
+                || Math.abs(candidate.actualLength - candidate.encodedLength) < Math.abs(best.actualLength - best.encodedLength)
+                || candidate.markerOffset < best.markerOffset
+                || (candidate.markerOffset === best.markerOffset && candidate.shift < best.shift)) {
+                best = candidate;
+            }
+        }
+    }
+
+    return best;
+}
+
+function tryDecodeFramePlacementRow(
+    window: Buffer,
+    markerOffset: number,
+    shift: number,
+): PsProfileWrapperFrameRecord | null {
+    const floats = readMarkerFloats(window, markerOffset, shift);
+    if (floats.length < 9) return null;
+
+    const axis = {
+        x: floats[3],
+        y: floats[4],
+        z: floats[5],
+    };
+    const refdir = {
+        x: floats[6],
+        y: floats[7],
+        z: floats[8],
+    };
+    const axisMag = magnitude(axis);
+    const refdirMag = magnitude(refdir);
+    if (axisMag < 0.8 || axisMag > 1.2 || refdirMag < 0.8 || refdirMag > 1.2) return null;
+
+    const normalizedAxis = normalize(axis);
+    const normalizedRefdir = normalize(refdir);
+    if (Math.abs(dot(normalizedAxis, normalizedRefdir)) > 0.1) return null;
+
+    return {
+        markerByte: window[markerOffset],
+        markerOffset,
+        shift,
+        origin: mmPointFromFloats(floats, 0),
+        axis: normalizedAxis,
+        refdir: normalizedRefdir,
+        tailScalars: floats.slice(9),
+    };
 }
 
 function buildGeometryLikeAliases(direct: PsDirectGeometryLikeRecord[]): PsGeometryLikeAliasRecord[] {

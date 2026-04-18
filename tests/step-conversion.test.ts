@@ -1910,6 +1910,153 @@ describe('ParasolidParser', () => {
         expect(extended.get(1836)).toMatchObject({ type: 134, refIds: [1843, 1828, 1844, 1], markerByte: 0x2d });
     });
 
+    it('decodes the FTC_07 broad type-133 profile-segment loop', () => {
+        if (!ftc07Path) return;
+
+        const buf = readFileSync(ftc07Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const segments = parser.parseBroadProfileSegmentRecords();
+        const byId = new Map(segments.map(record => [record.id, record]));
+
+        expect(segments).toHaveLength(15);
+        expect(segments.every(record => record.type === 133)).toBe(true);
+
+        const segment46 = byId.get(46);
+        expect(segment46).toBeDefined();
+        expect(segment46?.refIds).toEqual([2, 48, 16, 1]);
+        expect(segment46?.markerByte).toBe(0x2b);
+        expect(segment46?.markerOffset).toBe(18);
+        expect(segment46?.shift).toBe(3);
+        expect(segment46?.startPoint.x).toBeCloseTo(-151.121, 3);
+        expect(segment46?.startPoint.y).toBeCloseTo(133.35, 3);
+        expect(segment46?.startPoint.z).toBeCloseTo(-76.5738, 3);
+        expect(segment46?.endPoint.x).toBeCloseTo(-151.121, 3);
+        expect(segment46?.endPoint.y).toBeCloseTo(133.35, 3);
+        expect(segment46?.endPoint.z).toBeCloseTo(76.5738, 3);
+        expect(segment46?.encodedLength).toBeCloseTo(153.148, 3);
+        expect(segment46?.actualLength).toBeCloseTo(153.148, 3);
+
+        const segment88 = byId.get(88);
+        expect(segment88).toBeDefined();
+        expect(segment88?.refIds).toEqual([2, 90, 87, 1]);
+        expect(segment88?.startPoint.x).toBeCloseTo(146.313, 3);
+        expect(segment88?.startPoint.y).toBeCloseTo(133.35, 3);
+        expect(segment88?.startPoint.z).toBeCloseTo(74.5822, 3);
+        expect(segment88?.endPoint.x).toBeCloseTo(146.313, 3);
+        expect(segment88?.endPoint.y).toBeCloseTo(133.35, 3);
+        expect(segment88?.endPoint.z).toBeCloseTo(-74.5822, 3);
+        expect(segment88?.encodedLength).toBeCloseTo(149.164, 3);
+        expect(segment88?.actualLength).toBeCloseTo(149.164, 3);
+    });
+
+    it('decodes the FTC_07 wrapper chain and wrapper-90 frame placement', () => {
+        if (!ftc07Path) return;
+
+        const buf = readFileSync(ftc07Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const wrappers = parser.parseProfileWrapperRecords();
+        const byId = new Map(wrappers.map(record => [record.id, record]));
+
+        expect(wrappers.map(record => record.id)).toEqual([16, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90]);
+
+        const wrapper51 = byId.get(51);
+        expect(wrapper51).toBeDefined();
+        expect(wrapper51?.refIds).toEqual([2, 52, 49, 53]);
+        expect(wrapper51?.previousSegmentId).toBe(49);
+        expect(wrapper51?.nextSegmentId).toBe(52);
+        expect(wrapper51?.primaryMarkerByte).toBe(0x2b);
+        expect(wrapper51?.primaryMarkerOffset).toBe(18);
+        expect(wrapper51?.primaryShift).toBe(1);
+        expect(wrapper51?.primaryPoint?.x).toBeCloseTo(-121.024, 3);
+        expect(wrapper51?.primaryPoint?.y).toBeCloseTo(133.35, 3);
+        expect(wrapper51?.primaryPoint?.z).toBeCloseTo(-106.671, 3);
+        expect(wrapper51?.primaryDirection?.x).toBeCloseTo(-0.707107, 5);
+        expect(wrapper51?.primaryDirection?.y).toBeCloseTo(0, 5);
+        expect(wrapper51?.primaryDirection?.z).toBeCloseTo(0.707107, 5);
+        expect(wrapper51?.framePlacement).toBeNull();
+
+        const wrapper90 = byId.get(90);
+        expect(wrapper90).toBeDefined();
+        expect(wrapper90?.refIds).toEqual([2, 1, 88, 91]);
+        expect(wrapper90?.previousSegmentId).toBe(88);
+        expect(wrapper90?.nextSegmentId).toBeNull();
+        expect(wrapper90?.primaryPoint?.x).toBeCloseTo(146.313, 3);
+        expect(wrapper90?.primaryPoint?.y).toBeCloseTo(133.35, 3);
+        expect(wrapper90?.primaryPoint?.z).toBeCloseTo(74.5822, 3);
+        expect(wrapper90?.primaryDirection?.x).toBeCloseTo(0, 5);
+        expect(wrapper90?.primaryDirection?.y).toBeCloseTo(0, 5);
+        expect(wrapper90?.primaryDirection?.z).toBeCloseTo(-1, 5);
+        expect(wrapper90?.framePlacement).not.toBeNull();
+        expect(wrapper90?.framePlacement?.markerByte).toBe(0x2b);
+        expect(wrapper90?.framePlacement?.markerOffset).toBe(243);
+        expect(wrapper90?.framePlacement?.shift).toBe(1);
+        expect(wrapper90?.framePlacement?.origin.x).toBeCloseTo(0, 6);
+        expect(wrapper90?.framePlacement?.origin.y).toBeCloseTo(-115.57, 3);
+        expect(wrapper90?.framePlacement?.origin.z).toBeCloseTo(0, 6);
+        expect(wrapper90?.framePlacement?.axis.x).toBeCloseTo(0, 6);
+        expect(wrapper90?.framePlacement?.axis.y).toBeCloseTo(1, 6);
+        expect(wrapper90?.framePlacement?.axis.z).toBeCloseTo(0, 6);
+        expect(wrapper90?.framePlacement?.refdir.x).toBeCloseTo(0, 6);
+        expect(wrapper90?.framePlacement?.refdir.y).toBeCloseTo(0, 6);
+        expect(wrapper90?.framePlacement?.refdir.z).toBeCloseTo(1, 6);
+
+        const wrapper16 = byId.get(16);
+        expect(wrapper16).toBeDefined();
+        expect(wrapper16?.previousSegmentId).toBeNull();
+        expect(wrapper16?.nextSegmentId).toBe(46);
+    });
+
+    it('groups the FTC_07 profile skeleton components and recovers the wrapper16 closure', () => {
+        if (!ftc07Path) return;
+
+        const buf = readFileSync(ftc07Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const components = parser.parseProfileSkeletonComponents();
+
+        expect(components).toHaveLength(2);
+
+        const closed = components.find(component => component.segmentIds.join(',') === '88,85,82,79,76,73,70,67');
+        expect(closed).toBeDefined();
+        expect(closed?.closed).toBe(true);
+        expect(closed?.closureWrapperId).toBeNull();
+        expect(closed?.vertexPoints).toHaveLength(8);
+        expect(closed?.vertexPoints[0]?.x).toBeCloseTo(146.313, 3);
+        expect(closed?.vertexPoints[0]?.y).toBeCloseTo(133.35, 3);
+        expect(closed?.vertexPoints[0]?.z).toBeCloseTo(74.5822, 3);
+
+        const open = components.find(component => component.segmentIds.join(',') === '64,61,58,55,52,49,46');
+        expect(open).toBeDefined();
+        expect(open?.closed).toBe(false);
+        expect(open?.closureWrapperId).toBe(16);
+        expect(open?.closurePoint?.x).toBeCloseTo(-151.121, 3);
+        expect(open?.closurePoint?.y).toBeCloseTo(133.35, 3);
+        expect(open?.closurePoint?.z).toBeCloseTo(76.5738, 3);
+        expect(open?.closureDirection?.x).toBeCloseTo(0.707107, 5);
+        expect(open?.closureDirection?.y).toBeCloseTo(0, 5);
+        expect(open?.closureDirection?.z).toBeCloseTo(0.707107, 5);
+        expect(open?.closureLength).toBeCloseTo(42.5637, 3);
+        expect(open?.vertexPoints).toHaveLength(8);
+        expect(open?.vertexPoints[0]?.x).toBeCloseTo(-151.121, 3);
+        expect(open?.vertexPoints[0]?.y).toBeCloseTo(133.35, 3);
+        expect(open?.vertexPoints[0]?.z).toBeCloseTo(76.5738, 3);
+        expect(open?.vertexPoints[1]?.x).toBeCloseTo(-121.024, 3);
+        expect(open?.vertexPoints[1]?.z).toBeCloseTo(106.671, 3);
+        expect(open?.vertexPoints[7]?.x).toBeCloseTo(-151.121, 3);
+        expect(open?.vertexPoints[7]?.z).toBeCloseTo(-76.5738, 3);
+    });
+
     it('creates conservative alias records for the no-header geometry-like residue', () => {
         if (!hasSamples) return;
 
@@ -2536,6 +2683,92 @@ describe('ParasolidParser', () => {
             .some(surface => coneMatchesCanonical(surface.params as TestConeParams, expected, positionTol, 0.02)));
 
         expect(hasRepresentativeCones).toBe(true);
+    });
+
+    it('places the FTC_07 shallow 2-degree cone centers between the recovered profile skeleton loops', () => {
+        if (!ftc07Path) return;
+
+        const distancePointToSegment2D = (
+            point: { x: number; z: number },
+            start: { x: number; z: number },
+            end: { x: number; z: number },
+        ): number => {
+            const dx = end.x - start.x;
+            const dz = end.z - start.z;
+            const lengthSq = dx * dx + dz * dz;
+            if (lengthSq <= 1e-12) return Math.hypot(point.x - start.x, point.z - start.z);
+            const t = ((point.x - start.x) * dx + (point.z - start.z) * dz) / lengthSq;
+            const clamped = Math.max(0, Math.min(1, t));
+            const projX = start.x + clamped * dx;
+            const projZ = start.z + clamped * dz;
+            return Math.hypot(point.x - projX, point.z - projZ);
+        };
+
+        const minDistanceToLoop2D = (
+            point: { x: number; z: number },
+            vertices: Array<{ x: number; z: number }>,
+        ): number => {
+            let best = Infinity;
+            for (let index = 0; index < vertices.length; index++) {
+                const start = vertices[index];
+                const end = vertices[(index + 1) % vertices.length];
+                best = Math.min(best, distancePointToSegment2D(point, start, end));
+            }
+            return best;
+        };
+
+        const normalize = (vector: { x: number; y: number; z: number }) => {
+            const length = Math.hypot(vector.x, vector.y, vector.z) || 1;
+            return {
+                x: vector.x / length,
+                y: vector.y / length,
+                z: vector.z / length,
+            };
+        };
+
+        const buf = readFileSync(ftc07Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const components = parser.parseProfileSkeletonComponents()
+            .map((component) => ({
+                ...component,
+                avgRadius: component.vertexPoints.reduce((sum, point) => sum + Math.hypot(point.x, point.z), 0) / component.vertexPoints.length,
+            }))
+            .sort((left, right) => right.avgRadius - left.avgRadius);
+        const model = parser.parse();
+        const targetHalfAngle = 2 * Math.PI / 180;
+
+        const centerMap = new Map<string, { origin: { x: number; y: number; z: number }; radii: number[] }>();
+        for (const surface of model.surfaces) {
+            if (surface.surfaceType !== 'cone') continue;
+
+            const params = surface.params as TestConeParams;
+            const axis = normalize(params.axis);
+            if (Math.abs(Math.abs(axis.y) - 1) >= 1e-3 || Math.abs(axis.x) >= 1e-3 || Math.abs(axis.z) >= 1e-3) continue;
+            if (Math.abs(Math.abs(params.halfAngle) - targetHalfAngle) >= 0.02) continue;
+            if (params.origin.y <= 0 || params.origin.y >= 30) continue;
+            if (params.radius <= 5 || params.radius >= 15) continue;
+
+            const key = `${params.origin.x.toFixed(3)}|${params.origin.z.toFixed(3)}`;
+            const bucket = centerMap.get(key) ?? { origin: params.origin, radii: [] };
+            bucket.radii.push(params.radius);
+            centerMap.set(key, bucket);
+        }
+
+        expect(components).toHaveLength(2);
+        expect(centerMap.size).toBe(8);
+
+        for (const center of centerMap.values()) {
+            const sortedRadii = [...center.radii].sort((left, right) => right - left);
+            expect(sortedRadii).toHaveLength(2);
+
+            const loopDistances = components.map((component) => minDistanceToLoop2D(center.origin, component.vertexPoints));
+            expect(Math.abs(loopDistances[0] - sortedRadii[0])).toBeLessThan(0.15);
+            expect(Math.abs(loopDistances[1] - sortedRadii[1])).toBeLessThan(0.15);
+        }
     });
 
     it('recovers representative sphere surfaces from multi-axis raw cylinder clusters', () => {

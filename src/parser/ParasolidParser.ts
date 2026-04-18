@@ -70,6 +70,7 @@ import type {
     BoundaryBudgetTarget,
     PointEdgeChainPosition,
     RawEntity,
+    PsBroadProfileSegmentRecord,
     PsCoedgeChain,
     PsCoedgeRecord,
     PsCompactGeometryLikeRecord,
@@ -88,6 +89,7 @@ import type {
     PsNamedClassDefinition,
     PsPackedGeometryLikeRecord,
     PsPointRecord,
+    PsProfileSkeletonComponent,
     PsRawFaceBoundaryHint,
     PsSchemaFieldDefinition,
     PsSchemaMetadata,
@@ -96,6 +98,8 @@ import type {
     PsShellInlineContainerLink,
     PsShellInlineFaceAnchorRecord,
     PsShellInlineFaceRecord,
+    PsProfileWrapperFrameRecord,
+    PsProfileWrapperRecord,
     PsTransmitHeader,
 } from './ParasolidParserTypes.js';
 import {
@@ -139,6 +143,7 @@ import {
     findEntityClasses as findEntityClassesImpl,
     getEntityCensus as getEntityCensusImpl,
     parseAllGeometryLikeRecords as parseAllGeometryLikeRecordsImpl,
+    parseBroadProfileSegmentRecords as parseBroadProfileSegmentRecordsImpl,
     parseCoedgeChain as parseCoedgeChainImpl,
     parseCoedgeRecords as parseCoedgeRecordsImpl,
     parseCompactGeometryLikeRecords as parseCompactGeometryLikeRecordsImpl,
@@ -154,6 +159,8 @@ import {
     parseHeader as parseHeaderImpl,
     parsePackedGeometryLikeRecords as parsePackedGeometryLikeRecordsImpl,
     parsePointRecords as parsePointRecordsImpl,
+    parseProfileSkeletonComponents as parseProfileSkeletonComponentsImpl,
+    parseProfileWrapperRecords as parseProfileWrapperRecordsImpl,
     parseSchemaMetadata as parseSchemaMetadataImpl,
     parseSentinelAlignedEntities as parseSentinelAlignedEntitiesImpl,
     parseShellInlineContainerGraph as parseShellInlineContainerGraphImpl,
@@ -185,9 +192,13 @@ export type {
     PsRawFaceBoundaryHint,
     PsCompactGeometryRecord,
     PsCompactGeometryLikeRecord,
+    PsBroadProfileSegmentRecord,
     PsPackedGeometryLikeRecord,
     PsGeometryLikeAliasRecord,
     PsGapPointRecord,
+    PsProfileSkeletonComponent,
+    PsProfileWrapperFrameRecord,
+    PsProfileWrapperRecord,
 } from './ParasolidParserTypes.js';
 
 // ── Parser class ──────────────────────────────────────────────────────────────
@@ -548,6 +559,21 @@ export class ParasolidParser {
     /** Merge compact and packed geometry-like records for edge-link resolution. */
     parseAllGeometryLikeRecords(): Array<PsDirectGeometryLikeRecord | PsGeometryLikeAliasRecord> {
         return parseAllGeometryLikeRecordsImpl(this.buf);
+    }
+
+    /** Decode broad type-133 records whose shifted marker row forms exact mm-space profile segments. */
+    parseBroadProfileSegmentRecords(): PsBroadProfileSegmentRecord[] {
+        return parseBroadProfileSegmentRecordsImpl(this.buf);
+    }
+
+    /** Decode adjacent type-30 wrappers that carry point+tangent rows and optional frame placements. */
+    parseProfileWrapperRecords(): PsProfileWrapperRecord[] {
+        return parseProfileWrapperRecordsImpl(this.buf);
+    }
+
+    /** Group broad profile segments into structural skeleton components and recover wrapper-based closures when present. */
+    parseProfileSkeletonComponents(): PsProfileSkeletonComponent[] {
+        return parseProfileSkeletonComponentsImpl(this.buf);
     }
 
     /** Build a position map for edges that participate in ordered component chains. @internal */

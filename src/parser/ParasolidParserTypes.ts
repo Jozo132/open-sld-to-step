@@ -253,6 +253,59 @@ export interface PsCompactGeometryRecord {
 
 export interface PsCompactGeometryLikeRecord extends PsCompactGeometryRecord {}
 
+export interface PsBroadProfileSegmentRecord {
+    offset: number;
+    type: number;
+    id: number;
+    refIds: [number, number, number, number];
+    markerByte: number;
+    markerOffset: number;
+    shift: number;
+    startPoint: PsPoint;
+    endPoint: PsPoint;
+    encodedLength: number;
+    actualLength: number;
+    tailScalar: number;
+}
+
+export interface PsProfileWrapperFrameRecord {
+    markerByte: number;
+    markerOffset: number;
+    shift: number;
+    origin: PsPoint;
+    axis: PsPoint;
+    refdir: PsPoint;
+    tailScalars: number[];
+}
+
+export interface PsProfileWrapperRecord {
+    offset: number;
+    type: number;
+    id: number;
+    flags: number;
+    payloadBytes: number;
+    refIds: [number, number, number, number];
+    previousSegmentId: number | null;
+    nextSegmentId: number | null;
+    primaryMarkerByte: number | null;
+    primaryMarkerOffset: number | null;
+    primaryShift: number | null;
+    primaryPoint: PsPoint | null;
+    primaryDirection: PsPoint | null;
+    duplicatedSegment: PsBroadProfileSegmentRecord | null;
+    framePlacement: PsProfileWrapperFrameRecord | null;
+}
+
+export interface PsProfileSkeletonComponent {
+    segmentIds: number[];
+    vertexPoints: PsPoint[];
+    closed: boolean;
+    closureWrapperId: number | null;
+    closurePoint: PsPoint | null;
+    closureDirection: PsPoint | null;
+    closureLength: number | null;
+}
+
 export interface PsPackedGeometryLikeRecord {
     offset: number;
     type: number;
