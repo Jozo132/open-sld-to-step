@@ -682,13 +682,31 @@ export class ParasolidParser {
         cylSurfaces: PsSurface[],
         vertices: PsVertex[],
         vertexSurfaceMap: Map<number, number[]>,
-    ): Array<{ center: PsPoint; radius: number; seamPoint: PsPoint; support: number }> {
+    ): Array<{
+        center: PsPoint;
+        radius: number;
+        seamPoint: PsPoint;
+        support: number;
+        surfaceId: number;
+        surfaceType: 'cylinder' | 'cone';
+        origin: PsPoint;
+        axis: PsPoint;
+    }> {
         const { uAxis, vAxis } = ParasolidParser.planeBasis(normal);
-        const candidates: Array<{ center: PsPoint; radius: number; seamPoint: PsPoint; support: number }> = [];
+        const candidates: Array<{
+            center: PsPoint;
+            radius: number;
+            seamPoint: PsPoint;
+            support: number;
+            surfaceId: number;
+            surfaceType: 'cylinder' | 'cone';
+            origin: PsPoint;
+            axis: PsPoint;
+        }> = [];
 
         for (const cyl of cylSurfaces) {
             const cp = cyl.params as Record<string, unknown>;
-            const cylAxis = cp.axis as PsPoint;
+            const cylAxis = ParasolidParser.normalizeDirection(cp.axis as PsPoint);
             const cylOrigin = cp.origin as PsPoint;
             const cylRadius = cp.radius as number;
 
@@ -741,6 +759,10 @@ export class ParasolidParser {
                     z: center.z + cylRadius * uAxis.z,
                 },
                 support: cylVtxIndices.length,
+                surfaceId: cyl.id,
+                surfaceType: cyl.surfaceType === 'cone' ? 'cone' : 'cylinder',
+                origin: cylOrigin,
+                axis: cylAxis,
             });
         }
 
@@ -1627,6 +1649,15 @@ export class ParasolidParser {
     private static readonly INFERRED_SPHERE_AXIS_DOT_MAX = 0.98;
     private static readonly INFERRED_SPHERE_MIN_AXIS_VARIANTS = 2;
     private static readonly INFERRED_SPHERE_MIN_SUPPORT = 2;
+    private static readonly INFERRED_TORUS_RADIUS_CLUSTER_TOL = 0.75;
+    private static readonly INFERRED_TORUS_MIN_SUPPORT = 2;
+    private static readonly INFERRED_TORUS_MINOR_RADIUS_MIN = 0.5;
+    private static readonly INFERRED_TORUS_MINOR_RADIUS_MAX = 2.1;
+    private static readonly INFERRED_TORUS_OUTER_MARGIN_MIN = 0.25;
+    private static readonly INFERRED_TORUS_OUTER_RATIO_MIN = 1.05;
+    private static readonly INFERRED_TORUS_OUTER_RATIO_MAX = 1.35;
+    private static readonly INFERRED_TORUS_ORIGIN_TOL = 0.25;
+    private static readonly INFERRED_TORUS_RADIUS_TOL = 0.1;
 
     /**
      * Maximum PCA eigenvalue ratio (λ1/λ2) for a candidate plane to be
@@ -1780,6 +1811,32 @@ export class ParasolidParser {
         threshold: number,
     ): Array<Array<{ u: number; v: number; idx: number }>> {
         return clusterPoints2DImpl(pts, threshold);
+    }
+
+    /** Cluster 1-D scalar values by proximity. @internal */
+    private static clusterScalarValues(
+        values: number[],
+        tolerance: number,
+    ): Array<{ center: number; count: number }> {
+        if (values.length === 0) return [];
+
+        const sorted = values.slice().sort((left, right) => left - right);
+        const groups: number[][] = [];
+        let current = [sorted[0]];
+
+        for (let index = 1; index < sorted.length; index++) {
+            if (Math.abs(sorted[index] - current[current.length - 1]) <= tolerance) current.push(sorted[index]);
+            else {
+                groups.push(current);
+                current = [sorted[index]];
+            }
+        }
+        groups.push(current);
+
+        return groups.map((group) => ({
+            center: group.reduce((sum, value) => sum + value, 0) / group.length,
+            count: group.length,
+        }));
     }
 
     /**
@@ -2378,6 +2435,28 @@ export class ParasolidParser {
             const dy = leftOrigin.y - rightOrigin.y;
             const dz = leftOrigin.z - rightOrigin.z;
             return Math.sqrt(dx * dx + dy * dy + dz * dz) < ParasolidParser.INFERRED_SPHERE_ORIGIN_TOL;
+        }
+
+        if (left.surfaceType === 'torus') {
+            const leftAxis = leftParams.axis as PsPoint;
+            const rightAxis = rightParams.axis as PsPoint;
+            const axisDot = leftAxis.x * rightAxis.x + leftAxis.y * rightAxis.y + leftAxis.z * rightAxis.z;
+            if (Math.abs(Math.abs(axisDot) - 1) >= ParasolidParser.CYL_AXIS_TOL) return false;
+
+            const leftOrigin = leftParams.origin as PsPoint;
+            const rightOrigin = rightParams.origin as PsPoint;
+            const dx = leftOrigin.x - rightOrigin.x;
+            const dy = leftOrigin.y - rightOrigin.y;
+            const dz = leftOrigin.z - rightOrigin.z;
+            if (Math.sqrt(dx * dx + dy * dy + dz * dz) >= ParasolidParser.INFERRED_TORUS_ORIGIN_TOL) return false;
+
+            const leftMajor = leftParams.majorRadius as number;
+            const rightMajor = rightParams.majorRadius as number;
+            if (Math.abs(leftMajor - rightMajor) >= ParasolidParser.INFERRED_TORUS_RADIUS_TOL) return false;
+
+            const leftMinor = leftParams.minorRadius as number;
+            const rightMinor = rightParams.minorRadius as number;
+            return Math.abs(leftMinor - rightMinor) < ParasolidParser.INFERRED_TORUS_RADIUS_TOL;
         }
 
         return false;
@@ -3878,6 +3957,122 @@ export class ParasolidParser {
     }
 
     /**
+     * Recover narrow outer-blend torus families from bounded plane-hole faces.
+     *
+     * Clean-room basis:
+     * - start from a bounded plane patch that already survives clustering
+     * - require a coaxial cylinder hole whose radius is only slightly larger
+     *   than the plane-side major-radius cluster
+     * - derive the torus center by offsetting from the plane along its normal
+     *
+     * This intentionally targets only the verified FTC_07 / FTC_08-style
+     * outer blends and rejects the broader CTC_04 plane-cross-talk cases.
+     */
+    private inferOuterBlendToriFromPlaneHoleBoundaries(
+        surfaces: PsSurface[],
+        vertices: PsVertex[],
+    ): PsSurface[] {
+        if (surfaces.some((surface) => surface.surfaceType === 'torus')) return [];
+
+        const planes = surfaces.filter((surface): surface is PsSurface & {
+            surfaceType: 'plane';
+            params: { origin: PsPoint; normal: PsPoint };
+        } => surface.surfaceType === 'plane');
+        const sectionSurfaces = surfaces.filter((surface): surface is PsSurface & {
+            surfaceType: 'cylinder' | 'cone';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        } => surface.surfaceType === 'cylinder' || surface.surfaceType === 'cone');
+        if (planes.length === 0 || sectionSurfaces.length === 0) return [];
+
+        const vertexSurfaceMap = this.associateVertices(surfaces, vertices);
+        const inferred: PsSurface[] = [];
+        let nextId = surfaces.reduce((maxId, surface) => Math.max(maxId, surface.id), 0) + 1;
+
+        for (const plane of planes) {
+            const assocIndices = vertexSurfaceMap.get(plane.id) ?? [];
+            if (assocIndices.length < 4) continue;
+
+            const planeOrigin = plane.params.origin;
+            const planeNormal = ParasolidParser.normalizeDirection(plane.params.normal);
+            const boundaryClusters = this.buildPlaneBoundaryClusters(
+                planeOrigin,
+                planeNormal,
+                assocIndices,
+                vertices,
+            );
+
+            for (const boundaryPts of boundaryClusters) {
+                if (boundaryPts.length < 4) continue;
+
+                const boundaryVertices = boundaryPts.map((point) => vertices[point.idx].position);
+                const holeCandidates = this.collectPlaneHoleCandidates(
+                    planeOrigin,
+                    planeNormal,
+                    boundaryPts,
+                    sectionSurfaces,
+                    vertices,
+                    vertexSurfaceMap,
+                );
+
+                for (const holeCandidate of holeCandidates) {
+                    const axisDot =
+                        holeCandidate.axis.x * planeNormal.x +
+                        holeCandidate.axis.y * planeNormal.y +
+                        holeCandidate.axis.z * planeNormal.z;
+                    if (Math.abs(Math.abs(axisDot) - 1) > 0.02) continue;
+
+                    const boundaryRadii = boundaryVertices
+                        .map((point) => ParasolidParser.axisLineDistance(point, holeCandidate.center, planeNormal))
+                        .filter((radius) => radius > 0.1);
+                    const radialClusters = ParasolidParser.clusterScalarValues(
+                        boundaryRadii,
+                        ParasolidParser.INFERRED_TORUS_RADIUS_CLUSTER_TOL,
+                    );
+
+                    for (const cluster of radialClusters) {
+                        if (cluster.count < ParasolidParser.INFERRED_TORUS_MIN_SUPPORT) continue;
+
+                        const majorRadius = cluster.center;
+                        const minorRadius = Math.abs(holeCandidate.radius - majorRadius);
+                        const outerRatio = holeCandidate.radius / Math.max(majorRadius, 1e-6);
+                        if (holeCandidate.radius <= majorRadius + ParasolidParser.INFERRED_TORUS_OUTER_MARGIN_MIN) continue;
+                        if (minorRadius < ParasolidParser.INFERRED_TORUS_MINOR_RADIUS_MIN ||
+                            minorRadius > ParasolidParser.INFERRED_TORUS_MINOR_RADIUS_MAX) continue;
+                        if (outerRatio < ParasolidParser.INFERRED_TORUS_OUTER_RATIO_MIN ||
+                            outerRatio > ParasolidParser.INFERRED_TORUS_OUTER_RATIO_MAX) continue;
+
+                        const origin: PsPoint = {
+                            x: holeCandidate.center.x + planeNormal.x * minorRadius,
+                            y: holeCandidate.center.y + planeNormal.y * minorRadius,
+                            z: holeCandidate.center.z + planeNormal.z * minorRadius,
+                        };
+
+                        inferred.push({
+                            id: nextId++,
+                            surfaceType: 'torus',
+                            params: {
+                                origin,
+                                axis: planeNormal,
+                                majorRadius,
+                                minorRadius,
+                                baseCenter: holeCandidate.center,
+                                baseRadius: majorRadius,
+                                sectionCenter: origin,
+                                sectionRadius: holeCandidate.radius,
+                                sourcePlaneId: plane.id,
+                                sourceSurfaceId: holeCandidate.surfaceId,
+                                sourceSurfaceType: holeCandidate.surfaceType,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
+        return inferred;
+    }
+
+    /**
      * FTC_11-style washer recovery:
      * when parsing yields exactly 4 concentric Z-axis cylinders plus one false
      * mid-plane, reinterpret the upper cylinder pair as torus section circles
@@ -4218,6 +4413,98 @@ export class ParasolidParser {
         addTwoBoundaryFace(innerCylinder.surface.id, shoulderInner, bottomInner);
         addTwoBoundaryFace(outerTorus.surface.id, shoulderOuter, topOuter);
         addTwoBoundaryFace(innerTorus.surface.id, topInner, shoulderInner);
+
+        return { faces, loops, edges, curves, extraVertices };
+    }
+
+    /** Build minimal annular torus faces for outer-blend torus surfaces. @internal */
+    private buildOuterBlendTorusTopology(
+        surfaces: PsSurface[],
+        startingFaceId: number,
+        startingLoopId: number,
+        startingEdgeId: number,
+        startingCurveId: number,
+        startingVertexId: number,
+    ): {
+        faces: PsFace[];
+        loops: PsLoop[];
+        edges: PsEdge[];
+        curves: PsCurve[];
+        extraVertices: PsVertex[];
+    } {
+        const faces: PsFace[] = [];
+        const loops: PsLoop[] = [];
+        const edges: PsEdge[] = [];
+        const curves: PsCurve[] = [];
+        const extraVertices: PsVertex[] = [];
+
+        let nextFaceId = startingFaceId;
+        let nextLoopId = startingLoopId;
+        let nextEdgeId = startingEdgeId;
+        let nextCurveId = startingCurveId;
+        let nextExtraVtxId = startingVertexId;
+
+        for (const surf of surfaces) {
+            if (surf.surfaceType !== 'torus') continue;
+
+            const p = surf.params as Record<string, unknown>;
+            const axis = ParasolidParser.normalizeDirection((p.axis as PsPoint) ?? { x: 0, y: 0, z: 1 });
+            const baseCenter = p.baseCenter as PsPoint | undefined;
+            const sectionCenter = p.sectionCenter as PsPoint | undefined;
+            const baseRadius = p.baseRadius as number | undefined;
+            const sectionRadius = p.sectionRadius as number | undefined;
+            if (!baseCenter || !sectionCenter) continue;
+            if (!isFinite(baseRadius ?? NaN) || !isFinite(sectionRadius ?? NaN)) continue;
+            if ((baseRadius ?? 0) <= 0 || (sectionRadius ?? 0) <= 0) continue;
+
+            const boundaries = [
+                { center: baseCenter, radius: baseRadius! },
+                { center: sectionCenter, radius: sectionRadius! },
+            ].sort((left, right) => right.radius - left.radius);
+            if (Math.abs(boundaries[0].radius - boundaries[1].radius) < 0.01) continue;
+
+            const { uAxis } = ParasolidParser.planeBasis(axis);
+            const buildCircleLoop = (boundary: { center: PsPoint; radius: number }) => {
+                const seamPoint: PsPoint = {
+                    x: boundary.center.x + boundary.radius * uAxis.x,
+                    y: boundary.center.y + boundary.radius * uAxis.y,
+                    z: boundary.center.z + boundary.radius * uAxis.z,
+                };
+                const vertexId = nextExtraVtxId++;
+                extraVertices.push({ id: vertexId, position: seamPoint });
+
+                const curveId = nextCurveId++;
+                curves.push({
+                    id: curveId,
+                    curveType: 'circle',
+                    params: { center: boundary.center, normal: axis, radius: boundary.radius },
+                });
+
+                const edgeId = nextEdgeId++;
+                edges.push({
+                    id: edgeId,
+                    startVertex: vertexId,
+                    endVertex: vertexId,
+                    curve: curveId,
+                    sense: true,
+                });
+
+                const loopId = nextLoopId++;
+                loops.push({ id: loopId, edges: [edgeId], senses: [true] });
+                return loopId;
+            };
+
+            const outerLoopId = buildCircleLoop(boundaries[0]);
+            const innerLoopId = buildCircleLoop(boundaries[1]);
+
+            faces.push({
+                id: nextFaceId++,
+                surface: surf.id,
+                outerLoop: outerLoopId,
+                innerLoops: [innerLoopId],
+                sense: true,
+            });
+        }
 
         return { faces, loops, edges, curves, extraVertices };
     }
@@ -4735,6 +5022,20 @@ export class ParasolidParser {
             });
         }
 
+        const torusTopology = this.buildOuterBlendTorusTopology(
+            surfaces,
+            nextFaceId,
+            nextLoopId,
+            nextEdgeId,
+            nextCurveId,
+            nextExtraVtxId,
+        );
+        faces.push(...torusTopology.faces);
+        loops.push(...torusTopology.loops);
+        edges.push(...torusTopology.edges);
+        curves.push(...torusTopology.curves);
+        extraVertices.push(...torusTopology.extraVertices);
+
         return { faces, loops, edges, curves, extraVertices };
     }
 
@@ -4852,21 +5153,52 @@ export class ParasolidParser {
             ...compactShallowCones,
             ...compactShallowConeCompanions,
         ];
-        const surfaces = this.deduplicateSurfaces([...mergedSurfaces, ...inferredCones, ...inferredSpheres]);
-
-        // Re-number deduplicated surfaces sequentially
-        surfaces.forEach((s, i) => { s.id = i + 1; });
+        const baseSurfaces = this.deduplicateSurfaces([
+            ...mergedSurfaces,
+            ...inferredCones,
+            ...inferredSpheres,
+        ]);
+        const rawFaceBoundaryHints = this.buildRawFaceBoundaryHints(extractedSurfaces);
+        baseSurfaces.forEach((surface, index) => {
+            surface.id = index + 1;
+        });
 
         // ── Vertex-surface association and bounded topology ─────────────
-        const vertexSurfaceMap = this.associateVertices(surfaces, vertices);
-        const rawFaceBoundaryHints = this.buildRawFaceBoundaryHints(extractedSurfaces);
+        const baseVertexSurfaceMap = this.associateVertices(baseSurfaces, vertices);
+        const baseTopology = this.buildBoundedTopology(
+            baseSurfaces,
+            vertices,
+            baseVertexSurfaceMap,
+            rawFaceBoundaryHints,
+        );
 
-        const {
-            faces, loops, edges, curves, extraVertices,
-        } = this.buildBoundedTopology(surfaces, vertices, vertexSurfaceMap, rawFaceBoundaryHints);
+        // The bounded topology pass adds synthetic seam points for cylindrical
+        // and conical loops. Reuse those enriched vertices when probing torus
+        // signatures so FTC_07-style plane-hole blends can be localized.
+        vertices.push(...baseTopology.extraVertices);
 
-        // Add any extra vertices created for cylinder seam points
-        vertices.push(...extraVertices);
+        const inferredTori = this.deduplicateSurfaces(
+            this.inferOuterBlendToriFromPlaneHoleBoundaries(baseSurfaces, vertices),
+        );
+        inferredTori.forEach((surface, index) => {
+            surface.id = baseSurfaces.length + index + 1;
+        });
+        const surfaces = [...baseSurfaces, ...inferredTori];
+
+        const torusTopology = this.buildOuterBlendTorusTopology(
+            inferredTori,
+            baseTopology.faces.reduce((maxId, face) => Math.max(maxId, face.id), 0) + 1,
+            baseTopology.loops.reduce((maxId, loop) => Math.max(maxId, loop.id), 0) + 1,
+            baseTopology.edges.reduce((maxId, edge) => Math.max(maxId, edge.id), 0) + 1,
+            baseTopology.curves.reduce((maxId, curve) => Math.max(maxId, curve.id), 0) + 1,
+            vertices.length + 1,
+        );
+        vertices.push(...torusTopology.extraVertices);
+
+        const faces = [...baseTopology.faces, ...torusTopology.faces];
+        const loops = [...baseTopology.loops, ...torusTopology.loops];
+        const edges = [...baseTopology.edges, ...torusTopology.edges];
+        const curves = [...baseTopology.curves, ...torusTopology.curves];
 
         const shells: PsShell[] = faces.length > 0 ? [{
             id: 1,

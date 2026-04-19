@@ -47,6 +47,9 @@ const ctc05Path = sampleFiles.find(filePath =>
 const ftc06Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ftc_06_asme1_rd_sw1802.sldprt',
 );
+const ftc08Path = sampleFiles.find(filePath =>
+    basename(filePath).toLowerCase() === 'nist_ftc_08_asme1_rc_sw1802.sldprt',
+);
 const ftc09Path = sampleFiles.find(filePath =>
     basename(filePath).toLowerCase() === 'nist_ftc_09_asme1_rd_sw1802.sldprt',
 );
@@ -109,6 +112,13 @@ type TestCylinderParams = {
     origin: { x: number; y: number; z: number };
     axis: { x: number; y: number; z: number };
     radius: number;
+};
+
+type TestTorusParams = {
+    origin: { x: number; y: number; z: number };
+    axis: { x: number; y: number; z: number };
+    majorRadius: number;
+    minorRadius: number;
 };
 
 function canonicalizeTestCone(params: TestConeParams): {
@@ -206,6 +216,38 @@ function cylinderMatches(
     const py = dy - proj * expectedAxis.y;
     const pz = dz - proj * expectedAxis.z;
     return Math.sqrt(px * px + py * py + pz * pz) < originTol;
+}
+
+function torusMatches(
+    actual: TestTorusParams,
+    expected: TestTorusParams,
+    originTol = 0.1,
+    radiusTol = 0.05,
+): boolean {
+    const actualAxisLength = Math.hypot(actual.axis.x, actual.axis.y, actual.axis.z) || 1;
+    const expectedAxisLength = Math.hypot(expected.axis.x, expected.axis.y, expected.axis.z) || 1;
+    const actualAxis = {
+        x: actual.axis.x / actualAxisLength,
+        y: actual.axis.y / actualAxisLength,
+        z: actual.axis.z / actualAxisLength,
+    };
+    const expectedAxis = {
+        x: expected.axis.x / expectedAxisLength,
+        y: expected.axis.y / expectedAxisLength,
+        z: expected.axis.z / expectedAxisLength,
+    };
+    const axisDot =
+        actualAxis.x * expectedAxis.x +
+        actualAxis.y * expectedAxis.y +
+        actualAxis.z * expectedAxis.z;
+    if (Math.abs(Math.abs(axisDot) - 1) >= 0.01) return false;
+    if (Math.abs(actual.majorRadius - expected.majorRadius) >= radiusTol) return false;
+    if (Math.abs(actual.minorRadius - expected.minorRadius) >= radiusTol) return false;
+
+    const dx = actual.origin.x - expected.origin.x;
+    const dy = actual.origin.y - expected.origin.y;
+    const dz = actual.origin.z - expected.origin.z;
+    return Math.sqrt(dx * dx + dy * dy + dz * dz) < originTol;
 }
 
 // ── ParasolidParser unit tests ──────────────────────────────────────────────
@@ -2287,6 +2329,94 @@ describe('ParasolidParser', () => {
         expect(model.loops).toHaveLength(12);
         expect(model.edges).toHaveLength(6);
         expect(model.curves.filter(c => c.curveType === 'circle')).toHaveLength(6);
+    });
+
+    it('infers FTC_07 outer-blend torus families from bounded plane holes', () => {
+        if (!ftc07Path) return;
+
+        const buf = readFileSync(ftc07Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+        const torusSurfaces = model.surfaces.filter(surface => surface.surfaceType === 'torus');
+        const torusFaces = model.faces.filter(face => torusSurfaces.some(surface => surface.id === face.surface));
+
+        expect(torusSurfaces.length).toBeGreaterThanOrEqual(4);
+        expect(torusFaces.length).toBeGreaterThanOrEqual(4);
+
+        const expectedTori: TestTorusParams[] = [
+            {
+                origin: { x: -107.95, y: -105.664, z: -82.55 },
+                axis: { x: 0, y: 1, z: 0 },
+                majorRadius: 11.202,
+                minorRadius: 1.524,
+            },
+            {
+                origin: { x: 107.95, y: -105.664, z: -82.55 },
+                axis: { x: 0, y: 1, z: 0 },
+                majorRadius: 11.202,
+                minorRadius: 1.524,
+            },
+            {
+                origin: { x: -107.95, y: -105.664, z: 82.55 },
+                axis: { x: 0, y: 1, z: 0 },
+                majorRadius: 11.202,
+                minorRadius: 1.524,
+            },
+            {
+                origin: { x: 107.95, y: -105.664, z: 82.55 },
+                axis: { x: 0, y: 1, z: 0 },
+                majorRadius: 11.202,
+                minorRadius: 1.524,
+            },
+        ];
+
+        for (const expectedTorus of expectedTori) {
+            expect(
+                torusSurfaces.some((surface) => torusMatches(surface.params as TestTorusParams, expectedTorus, 0.1, 0.1)),
+            ).toBe(true);
+        }
+    });
+
+    it('infers the FTC_08 small outer-blend torus family from bounded plane holes', () => {
+        if (!ftc08Path) return;
+
+        const buf = readFileSync(ftc08Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const parser = new ParasolidParser(extraction.data);
+        const model = parser.parse();
+        const torusSurfaces = model.surfaces.filter(surface => surface.surfaceType === 'torus');
+        const torusFaces = model.faces.filter(face => torusSurfaces.some(surface => surface.id === face.surface));
+
+        expect(torusSurfaces.length).toBeGreaterThanOrEqual(2);
+        expect(torusFaces.length).toBeGreaterThanOrEqual(2);
+
+        const expectedTori: TestTorusParams[] = [
+            {
+                origin: { x: -121.285, y: 76.2, z: 47.752 },
+                axis: { x: 0, y: 0, z: 1 },
+                majorRadius: 2.413,
+                minorRadius: 0.762,
+            },
+            {
+                origin: { x: -127.635, y: 76.2, z: 47.752 },
+                axis: { x: 0, y: 0, z: 1 },
+                majorRadius: 2.413,
+                minorRadius: 0.762,
+            },
+        ];
+
+        for (const expectedTorus of expectedTori) {
+            expect(
+                torusSurfaces.some((surface) => torusMatches(surface.params as TestTorusParams, expectedTorus, 0.1, 0.1)),
+            ).toBe(true);
+        }
     });
 
     it('infers CTC_04 apex cones from coaxial cylinder transitions', () => {
