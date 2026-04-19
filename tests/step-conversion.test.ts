@@ -2771,6 +2771,78 @@ describe('ParasolidParser', () => {
         }
     });
 
+    it('recovers the FTC_07 short-gap 59-degree drill-tip cone family from repeated quarter-inch raw sections', () => {
+        if (!ftc07Path) return;
+
+        const buf = readFileSync(ftc07Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const model = new ParasolidParser(extraction.data).parse();
+        const targetHalfAngle = 59 * Math.PI / 180;
+        const shortGapTips = model.surfaces
+            .filter((surface): surface is { surfaceType: 'cone'; params: TestConeParams } => surface.surfaceType === 'cone')
+            .filter((surface) => {
+                const canonical = canonicalizeTestCone(surface.params);
+                return Math.abs(canonical.halfAngle - targetHalfAngle) < 0.02 &&
+                    Math.abs(canonical.axis.x) < 0.01 &&
+                    Math.abs(canonical.axis.z) < 0.01 &&
+                    canonical.axis.y > 0.99 &&
+                    Math.abs(surface.params.radius - 1.5875) < 0.05;
+            });
+
+        expect(shortGapTips).toHaveLength(8);
+        expect(shortGapTips.some((surface) => coneMatchesCanonical(surface.params, {
+            origin: { x: 107.95, y: -112.714, z: 82.55 },
+            axis: { x: 0, y: 1, z: 0 },
+            radius: 1.5875,
+            halfAngle: 59,
+        }, 0.2, 0.02))).toBe(true);
+        expect(shortGapTips.some((surface) => coneMatchesCanonical(surface.params, {
+            origin: { x: 142.875, y: 4.126, z: 98.425 },
+            axis: { x: 0, y: 1, z: 0 },
+            radius: 1.5875,
+            halfAngle: 59,
+        }, 0.2, 0.02))).toBe(true);
+    });
+
+    it('recovers the FTC_07 shallow 1-degree upper taper family from negative-Y short-gap stacks', () => {
+        if (!ftc07Path) return;
+
+        const buf = readFileSync(ftc07Path);
+        const extraction = SldprtContainerParser.extractParasolid(buf);
+        expect(extraction).not.toBeNull();
+        if (!extraction) return;
+
+        const model = new ParasolidParser(extraction.data).parse();
+        const targetHalfAngle = Math.PI / 180;
+        const shallowEntries = model.surfaces
+            .filter((surface): surface is { surfaceType: 'cone'; params: TestConeParams } => surface.surfaceType === 'cone')
+            .filter((surface) => {
+                const canonical = canonicalizeTestCone(surface.params);
+                return Math.abs(canonical.halfAngle - targetHalfAngle) < 0.002 &&
+                    Math.abs(canonical.axis.x) < 0.01 &&
+                    Math.abs(canonical.axis.z) < 0.01 &&
+                    canonical.axis.y < -0.99 &&
+                    Math.abs(surface.params.radius - 12.7) < 0.05;
+            });
+
+        expect(shallowEntries).toHaveLength(4);
+        expect(shallowEntries.some((surface) => coneMatchesCanonical(surface.params, {
+            origin: { x: 107.95, y: -104.14, z: 82.55 },
+            axis: { x: 0, y: -1, z: 0 },
+            radius: 12.7,
+            halfAngle: targetHalfAngle,
+        }, 0.2, 0.002))).toBe(true);
+        expect(shallowEntries.some((surface) => coneMatchesCanonical(surface.params, {
+            origin: { x: -107.95, y: -104.14, z: -82.55 },
+            axis: { x: 0, y: -1, z: 0 },
+            radius: 12.7,
+            halfAngle: targetHalfAngle,
+        }, 0.2, 0.002))).toBe(true);
+    });
+
     it('recovers representative sphere surfaces from multi-axis raw cylinder clusters', () => {
         if (!ftc07Path || !ctc02Path) return;
 

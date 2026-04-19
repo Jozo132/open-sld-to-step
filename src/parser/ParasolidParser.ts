@@ -1579,6 +1579,18 @@ export class ParasolidParser {
     private static readonly INFERRED_HALF_RADIUS_DRILLTIP_RADIUS_MIN = 1;
     private static readonly INFERRED_HALF_RADIUS_DRILLTIP_RADIUS_MAX = 3;
     private static readonly INFERRED_HALF_RADIUS_DRILLTIP_MAX_SUPPORT = 8;
+    private static readonly INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE = 59;
+    private static readonly INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_GAP_MIN = 7.5;
+    private static readonly INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_GAP_MAX = 8;
+    private static readonly INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_RADIUS_MIN = 3;
+    private static readonly INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_RADIUS_MAX = 3.3;
+    private static readonly INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_MAX_SUPPORT = 0;
+    private static readonly INFERRED_SHORT_GAP_HALF_RADIUS_RELATED_DISTANCE_MAX = 1;
+    private static readonly INFERRED_SHORT_GAP_HALF_RADIUS_Y_DELTA_MIN = -1.2;
+    private static readonly INFERRED_SHORT_GAP_HALF_RADIUS_Y_DELTA_MAX = -0.7;
+    private static readonly INFERRED_SHORT_GAP_SHALLOW_ENTRY_OUTPUT_ANGLE = Math.PI / 180;
+    private static readonly INFERRED_SHORT_GAP_SHALLOW_ENTRY_RADIUS_SCALE = 4;
+    private static readonly INFERRED_SHORT_GAP_SHALLOW_ENTRY_UPPER_Y_MAX = -50;
     private static readonly INFERRED_CENTER_DRILLTIP_RADIUS_MIN = 1.6;
     private static readonly INFERRED_CENTER_DRILLTIP_RADIUS_MAX = 1.9;
     private static readonly INFERRED_CENTER_DRILLTIP_CONE_RADIUS_MIN = 0.5;
@@ -3215,6 +3227,482 @@ export class ParasolidParser {
     }
 
     /**
+     * Collect FTC_07-style short-gap quarter-inch Y-axis cylinder stacks.
+     *
+     * Clean-room observation from the public NIST samples: FTC_07 contains a
+     * repeated family of zero-support 3.175 mm Y-axis cylinder sections with a
+     * short 7.62 mm axial gap. Those stacks back the still-missing 59-degree
+     * lower drill tips and the paired shallow 1-degree upper entry tapers.
+     */
+    private collectShortGapHalfRadiusDrillTipStacks(
+        rawSurfaces: PsSurface[],
+        vertices: PsVertex[],
+    ): {
+        cylinders: Array<PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        }>;
+        assoc: Map<number, number[]>;
+        stacks: Array<{
+            cylinder: PsSurface & {
+                surfaceType: 'cylinder';
+                params: { origin: PsPoint; axis: PsPoint; radius: number };
+            };
+            axis: PsPoint;
+            nearestAheadGap: number;
+            nearestAheadSection: (PsSurface & {
+                surfaceType: 'cylinder';
+                params: { origin: PsPoint; axis: PsPoint; radius: number };
+            }) | null;
+        }>;
+    } {
+        const cylinders = rawSurfaces.filter((surface): surface is PsSurface & {
+            surfaceType: 'cylinder';
+            params: { origin: PsPoint; axis: PsPoint; radius: number };
+        } => surface.surfaceType === 'cylinder');
+        if (cylinders.length === 0) {
+            return { cylinders: [], assoc: new Map<number, number[]>(), stacks: [] };
+        }
+
+        const assoc = this.associateVertices(cylinders, vertices);
+        const candidates = cylinders.filter((surface) => {
+            const axis = ParasolidParser.normalizeDirection(surface.params.axis);
+            return Math.abs(axis.x) < 0.05 &&
+                Math.abs(axis.z) < 0.05 &&
+                axis.y >= 0.95 &&
+                surface.params.radius >= ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_RADIUS_MIN &&
+                surface.params.radius <= ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_RADIUS_MAX &&
+                (assoc.get(surface.id)?.length ?? 0) <= ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_MAX_SUPPORT;
+        });
+
+        const stacks = candidates.map((cylinder) => {
+            const axis = ParasolidParser.normalizeDirection(cylinder.params.axis);
+            let nearestAheadGap = Infinity;
+            let nearestAheadSection: (PsSurface & {
+                surfaceType: 'cylinder';
+                params: { origin: PsPoint; axis: PsPoint; radius: number };
+            }) | null = null;
+
+            for (const other of candidates) {
+                if (other.id === cylinder.id) continue;
+                if (Math.abs(other.params.radius - cylinder.params.radius) >= ParasolidParser.CYL_RADIUS_TOL) continue;
+
+                const otherAxis = ParasolidParser.normalizeDirection(other.params.axis);
+                const dot = axis.x * otherAxis.x + axis.y * otherAxis.y + axis.z * otherAxis.z;
+                if (dot < 0.98) continue;
+                if (ParasolidParser.axisLineDistance(cylinder.params.origin, other.params.origin, axis) >
+                    ParasolidParser.INFERRED_APEX_CONE_LINE_TOL) {
+                    continue;
+                }
+
+                const gap =
+                    (other.params.origin.x - cylinder.params.origin.x) * axis.x +
+                    (other.params.origin.y - cylinder.params.origin.y) * axis.y +
+                    (other.params.origin.z - cylinder.params.origin.z) * axis.z;
+                if (gap < ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_GAP_MIN ||
+                    gap > ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_GAP_MAX) {
+                    continue;
+                }
+                if (gap < nearestAheadGap) {
+                    nearestAheadGap = gap;
+                    nearestAheadSection = other;
+                }
+            }
+
+            return { cylinder, axis, nearestAheadGap, nearestAheadSection };
+        });
+
+        return { cylinders, assoc, stacks };
+    }
+
+    /**
+     * Collect supplemental short-gap quarter-inch center sections from the
+     * compact and packed geometry-like streams. FTC_07 keeps one mirrored
+     * lower drill-tip center only in this representation.
+     */
+    private collectShortGapHalfRadiusSupplementalCenters(): Array<{
+        origin: PsPoint;
+        axis: PsPoint;
+        radius: number;
+    }> {
+        const collected = new Map<string, {
+            origin: PsPoint;
+            axis: PsPoint;
+            radius: number;
+        }>();
+
+        const collectFromRecords = (records: Array<{ id: number; type: number; offset: number }>) => {
+            const sorted = [...records].sort((left, right) => left.offset - right.offset);
+            for (let index = 0; index < sorted.length; index++) {
+                const record = sorted[index];
+                const nextOffset = sorted[index + 1]?.offset ?? this.buf.length;
+                const window = this.buf.subarray(record.offset, nextOffset);
+
+                for (const result of ParasolidParser.readAllGeomMarkers(window)) {
+                    const floats = result.floats;
+                    if (floats.length < 11) continue;
+
+                    const axis = ParasolidParser.normalizeDirection({
+                        x: floats[3],
+                        y: floats[4],
+                        z: floats[5],
+                    });
+                    const radius = floats[9] * PS_TO_MM;
+                    if (Math.abs(axis.x) > 0.05 || Math.abs(axis.z) > 0.05 || axis.y < 0.95) continue;
+                    if (radius < ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_RADIUS_MIN ||
+                        radius > ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_RADIUS_MAX) {
+                        continue;
+                    }
+
+                    const origin: PsPoint = {
+                        x: floats[0] * PS_TO_MM,
+                        y: floats[1] * PS_TO_MM,
+                        z: floats[2] * PS_TO_MM,
+                    };
+                    const key = [
+                        origin.x.toFixed(1),
+                        origin.y.toFixed(1),
+                        origin.z.toFixed(1),
+                        axis.x.toFixed(3),
+                        axis.y.toFixed(3),
+                        axis.z.toFixed(3),
+                        radius.toFixed(2),
+                    ].join('|');
+                    if (!collected.has(key)) {
+                        collected.set(key, { origin, axis, radius });
+                    }
+                }
+            }
+        };
+
+        collectFromRecords(this.parseCompactGeometryLikeRecords());
+        collectFromRecords(this.parsePackedGeometryLikeRecords());
+
+        return [...collected.values()];
+    }
+
+    /**
+     * Recover FTC_07-style 59-degree drill tips from short-gap quarter-inch
+     * Y-axis raw cylinder stacks.
+     */
+    private inferShortGapHalfRadiusDrillTipConesFromRawCylinderSections(
+        rawSurfaces: PsSurface[],
+        vertices: PsVertex[],
+    ): PsSurface[] {
+        const { cylinders, assoc, stacks } = this.collectShortGapHalfRadiusDrillTipStacks(rawSurfaces, vertices);
+        if (stacks.length === 0) return [];
+
+        const inferred: PsSurface[] = [];
+        const seen = new Set<string>();
+        const compareAngle = ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE * Math.PI / 180;
+        let nextId = rawSurfaces.reduce((maxId, surface) => Math.max(maxId, surface.id), 0) + 1;
+
+        for (const stack of stacks) {
+            const nearestAheadSection = stack.nearestAheadSection;
+            if (!nearestAheadSection || !isFinite(stack.nearestAheadGap)) continue;
+            if (this.hasCompetingLargerSectionAtOrigin(nearestAheadSection, cylinders, assoc)) continue;
+
+            const coneRadius = stack.cylinder.params.radius / 2;
+            const offset = coneRadius / Math.tan(compareAngle);
+            const coneOrigin: PsPoint = {
+                x: stack.cylinder.params.origin.x - stack.axis.x * offset,
+                y: stack.cylinder.params.origin.y - stack.axis.y * offset,
+                z: stack.cylinder.params.origin.z - stack.axis.z * offset,
+            };
+            const key = [
+                coneOrigin.x.toFixed(1),
+                coneOrigin.y.toFixed(1),
+                coneOrigin.z.toFixed(1),
+                stack.axis.x.toFixed(3),
+                stack.axis.y.toFixed(3),
+                stack.axis.z.toFixed(3),
+                coneRadius.toFixed(2),
+                ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE.toFixed(3),
+            ].join('|');
+            if (seen.has(key)) continue;
+
+            inferred.push({
+                id: nextId,
+                surfaceType: 'cone',
+                params: {
+                    origin: coneOrigin,
+                    axis: stack.axis,
+                    radius: coneRadius,
+                    halfAngle: ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE,
+                },
+            });
+            nextId++;
+            seen.add(key);
+        }
+
+        return inferred;
+    }
+
+    /**
+     * Complete symmetric FTC_07 short-gap drill-tip families when two sibling
+     * centers already yield the same lower 59-degree cone offset and the other
+     * mirrored centers expose only the leading quarter-inch section.
+     */
+    private inferRepeatedShortGapHalfRadiusDrillTipCones(
+        rawSurfaces: PsSurface[],
+        vertices: PsVertex[],
+        existingCones: PsSurface[],
+    ): PsSurface[] {
+        const { stacks } = this.collectShortGapHalfRadiusDrillTipStacks(rawSurfaces, vertices);
+        if (stacks.length < 3 || existingCones.length === 0) return [];
+
+        type ShortGapCone = PsSurface & {
+            surfaceType: 'cone';
+            params: { origin: PsPoint; axis: PsPoint; radius: number; halfAngle: number };
+        };
+        type ShortGapCenter = { origin: PsPoint; axis: PsPoint; radius: number };
+        type RelatedOffset = { cone: ShortGapCone; dx: number; dy: number; dz: number };
+        type CenterWithRelated = {
+            center: ShortGapCenter;
+            axis: PsPoint;
+            related: RelatedOffset[];
+        };
+
+        const relatedConeCandidates = existingCones.filter((surface): surface is ShortGapCone => {
+            if (surface.surfaceType !== 'cone') return false;
+            const params = surface.params as {
+                origin: PsPoint;
+                axis: PsPoint;
+                radius: number;
+                halfAngle: number;
+            };
+            const axis = ParasolidParser.normalizeDirection(params.axis);
+            return Math.abs(axis.x) < 0.05 &&
+                Math.abs(axis.z) < 0.05 &&
+                axis.y >= 0.95 &&
+                Math.abs(params.halfAngle - ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE) < 0.05 &&
+                params.radius >= 1.4 &&
+                params.radius <= 1.7;
+        });
+        if (relatedConeCandidates.length < 2) return [];
+
+        const centerMap = new Map<string, ShortGapCenter>();
+        for (const stack of stacks) {
+            const center: ShortGapCenter = {
+                origin: stack.cylinder.params.origin,
+                axis: stack.axis,
+                radius: stack.cylinder.params.radius,
+            };
+            const key = [
+                center.origin.x.toFixed(1),
+                center.origin.y.toFixed(1),
+                center.origin.z.toFixed(1),
+                center.axis.x.toFixed(3),
+                center.axis.y.toFixed(3),
+                center.axis.z.toFixed(3),
+                center.radius.toFixed(2),
+            ].join('|');
+            centerMap.set(key, center);
+        }
+        for (const center of this.collectShortGapHalfRadiusSupplementalCenters()) {
+            const key = [
+                center.origin.x.toFixed(1),
+                center.origin.y.toFixed(1),
+                center.origin.z.toFixed(1),
+                center.axis.x.toFixed(3),
+                center.axis.y.toFixed(3),
+                center.axis.z.toFixed(3),
+                center.radius.toFixed(2),
+            ].join('|');
+            if (!centerMap.has(key)) {
+                centerMap.set(key, center);
+            }
+        }
+
+        const centersWithRelated: CenterWithRelated[] = [...centerMap.values()].map((center) => {
+            const related = relatedConeCandidates
+                .map((cone) => ({
+                    cone,
+                    dx: cone.params.origin.x - center.origin.x,
+                    dy: cone.params.origin.y - center.origin.y,
+                    dz: cone.params.origin.z - center.origin.z,
+                }))
+                .filter((item) => {
+                    return Math.hypot(item.dx, item.dz) <= ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_RELATED_DISTANCE_MAX &&
+                        item.dy >= ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_Y_DELTA_MIN &&
+                        item.dy <= ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_Y_DELTA_MAX;
+                });
+            return {
+                center,
+                axis: center.axis,
+                related,
+            };
+        });
+
+        const existingKeys = new Set(relatedConeCandidates.map((cone) => [
+            cone.params.origin.x.toFixed(1),
+            cone.params.origin.y.toFixed(1),
+            cone.params.origin.z.toFixed(1),
+            cone.params.axis.x.toFixed(3),
+            cone.params.axis.y.toFixed(3),
+            cone.params.axis.z.toFixed(3),
+            cone.params.radius.toFixed(2),
+            ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE.toFixed(3),
+        ].join('|')));
+        let nextId = [...rawSurfaces, ...existingCones].reduce((maxId, surface) => Math.max(maxId, surface.id), 0) + 1;
+        const groups = new Map<string, CenterWithRelated[]>();
+
+        for (const item of centersWithRelated) {
+            const origin = item.center.origin;
+            const key = [
+                origin.y.toFixed(1),
+                item.axis.x.toFixed(3),
+                item.axis.y.toFixed(3),
+                item.axis.z.toFixed(3),
+                item.center.radius.toFixed(2),
+                Math.abs(origin.x).toFixed(1),
+                Math.abs(origin.z).toFixed(1),
+            ].join('|');
+            const bucket = groups.get(key) ?? [];
+            bucket.push(item);
+            groups.set(key, bucket);
+        }
+
+        const inferred: PsSurface[] = [];
+        for (const group of groups.values()) {
+            const populated = group.filter((item) => item.related.length > 0);
+            const empty = group.filter((item) => item.related.length === 0);
+            if (populated.length < 2 || empty.length === 0) continue;
+
+            const offsetStats = new Map<string, { dx: number; dy: number; dz: number; radius: number; count: number }>();
+            for (const item of populated) {
+                for (const related of item.related) {
+                    const key = [
+                        related.dx.toFixed(1),
+                        related.dy.toFixed(2),
+                        related.dz.toFixed(1),
+                    ].join('|');
+                    const stat = offsetStats.get(key);
+                    if (stat) {
+                        stat.dx += related.dx;
+                        stat.dy += related.dy;
+                        stat.dz += related.dz;
+                        stat.radius += related.cone.params.radius;
+                        stat.count++;
+                    } else {
+                        offsetStats.set(key, {
+                            dx: related.dx,
+                            dy: related.dy,
+                            dz: related.dz,
+                            radius: related.cone.params.radius,
+                            count: 1,
+                        });
+                    }
+                }
+            }
+
+            const repeatedOffsets = [...offsetStats.values()]
+                .filter((stat) => stat.count >= 2)
+                .map((stat) => ({
+                    dx: stat.dx / stat.count,
+                    dy: stat.dy / stat.count,
+                    dz: stat.dz / stat.count,
+                    radius: stat.radius / stat.count,
+                }));
+            if (repeatedOffsets.length === 0) continue;
+
+            for (const item of empty) {
+                for (const offset of repeatedOffsets) {
+                    const origin: PsPoint = {
+                        x: item.center.origin.x + offset.dx,
+                        y: item.center.origin.y + offset.dy,
+                        z: item.center.origin.z + offset.dz,
+                    };
+                    const key = [
+                        origin.x.toFixed(1),
+                        origin.y.toFixed(1),
+                        origin.z.toFixed(1),
+                        item.axis.x.toFixed(3),
+                        item.axis.y.toFixed(3),
+                        item.axis.z.toFixed(3),
+                        offset.radius.toFixed(2),
+                        ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE.toFixed(3),
+                    ].join('|');
+                    if (existingKeys.has(key)) continue;
+
+                    inferred.push({
+                        id: nextId,
+                        surfaceType: 'cone',
+                        params: {
+                            origin,
+                            axis: item.axis,
+                            radius: offset.radius,
+                            halfAngle: ParasolidParser.INFERRED_SHORT_GAP_HALF_RADIUS_DRILLTIP_OUTPUT_ANGLE,
+                        },
+                    });
+                    existingKeys.add(key);
+                    nextId++;
+                }
+            }
+        }
+
+        return inferred;
+    }
+
+    /**
+     * Recover FTC_07-style shallow 1-degree upper entry tapers from the
+     * negative-Y short-gap quarter-inch cylinder stacks.
+     */
+    private inferShortGapShallowEntryConesFromRawCylinderSections(
+        rawSurfaces: PsSurface[],
+        vertices: PsVertex[],
+    ): PsSurface[] {
+        const { cylinders, assoc, stacks } = this.collectShortGapHalfRadiusDrillTipStacks(rawSurfaces, vertices);
+        if (stacks.length === 0) return [];
+
+        const inferred: PsSurface[] = [];
+        const seen = new Set<string>();
+        let nextId = rawSurfaces.reduce((maxId, surface) => Math.max(maxId, surface.id), 0) + 1;
+
+        for (const stack of stacks) {
+            const upperSection = stack.nearestAheadSection;
+            if (!upperSection || !isFinite(stack.nearestAheadGap)) continue;
+            if (upperSection.params.origin.y > ParasolidParser.INFERRED_SHORT_GAP_SHALLOW_ENTRY_UPPER_Y_MAX) {
+                continue;
+            }
+            if (this.hasCompetingLargerSectionAtOrigin(upperSection, cylinders, assoc)) continue;
+
+            const axis: PsPoint = {
+                x: -stack.axis.x,
+                y: -stack.axis.y,
+                z: -stack.axis.z,
+            };
+            const coneRadius = upperSection.params.radius * ParasolidParser.INFERRED_SHORT_GAP_SHALLOW_ENTRY_RADIUS_SCALE;
+            const key = [
+                upperSection.params.origin.x.toFixed(1),
+                upperSection.params.origin.y.toFixed(1),
+                upperSection.params.origin.z.toFixed(1),
+                axis.x.toFixed(3),
+                axis.y.toFixed(3),
+                axis.z.toFixed(3),
+                coneRadius.toFixed(2),
+                ParasolidParser.INFERRED_SHORT_GAP_SHALLOW_ENTRY_OUTPUT_ANGLE.toFixed(3),
+            ].join('|');
+            if (seen.has(key)) continue;
+
+            inferred.push({
+                id: nextId,
+                surfaceType: 'cone',
+                params: {
+                    origin: upperSection.params.origin,
+                    axis,
+                    radius: coneRadius,
+                    halfAngle: ParasolidParser.INFERRED_SHORT_GAP_SHALLOW_ENTRY_OUTPUT_ANGLE,
+                },
+            });
+            nextId++;
+            seen.add(key);
+        }
+
+        return inferred;
+    }
+
+    /**
      * Complete repeated FTC_10-style center-cylinder drill-tip patterns when
      * equivalent raw center cylinders exist but one center is missing the two
      * symmetric child cones already observed around its siblings.
@@ -4046,6 +4534,7 @@ export class ParasolidParser {
             const radius = p.radius as number;
             const halfAngle = ParasolidParser.coneHalfAngleRadians((p.halfAngle as number) ?? 0);
             const tanHA = Math.tan(halfAngle);
+            const minBoundaryRadius = 0.01;
             const { uAxis, vAxis } = ParasolidParser.planeBasis(axis);
 
             let hMin: number | null = null;
@@ -4100,6 +4589,8 @@ export class ParasolidParser {
                 }
             }
             if (hMin === null || hMax === null || botRadius === null || topRadius === null) continue;
+            if (Math.abs(botRadius) < minBoundaryRadius) botRadius = 0;
+            if (Math.abs(topRadius) < minBoundaryRadius) topRadius = 0;
 
             const bottomCenter: PsPoint = {
                 x: origin.x + hMin * axis.x,
@@ -4125,6 +4616,8 @@ export class ParasolidParser {
 
             const outerLoopEdges: number[] = [];
             const outerLoopSenses: boolean[] = [];
+            const hasBottomCircle = botRadius >= minBoundaryRadius;
+            const hasTopCircle = topRadius >= minBoundaryRadius;
 
             if (boundaryConePts.length >= 3) {
                 for (let ci = 0; ci < boundaryConePts.length; ci++) {
@@ -4152,6 +4645,38 @@ export class ParasolidParser {
                     outerLoopEdges.push(edgeId);
                     outerLoopSenses.push(true);
                 }
+            } else if (hasBottomCircle !== hasTopCircle) {
+                const circleCenter = hasBottomCircle ? bottomCenter : topCenter;
+                const circleRadius = hasBottomCircle ? botRadius : topRadius;
+                const circlePoint: PsPoint = hasBottomCircle
+                    ? {
+                        x: bottomCenter.x + botRadius * uAxis.x,
+                        y: bottomCenter.y + botRadius * uAxis.y,
+                        z: bottomCenter.z + botRadius * uAxis.z,
+                    }
+                    : {
+                        x: topCenter.x + topRadius * uAxis.x,
+                        y: topCenter.y + topRadius * uAxis.y,
+                        z: topCenter.z + topRadius * uAxis.z,
+                    };
+                const apexPoint = hasBottomCircle ? topCenter : bottomCenter;
+                const circleVertexId = nextExtraVtxId++;
+                const apexVertexId = nextExtraVtxId++;
+                extraVertices.push({ id: circleVertexId, position: circlePoint });
+                extraVertices.push({ id: apexVertexId, position: apexPoint });
+
+                const circleCurveId = nextCurveId++;
+                curves.push({ id: circleCurveId, curveType: 'circle', params: { center: circleCenter, normal: axis, radius: circleRadius } });
+                const seamLineId = nextCurveId++;
+                curves.push({ id: seamLineId, curveType: 'line', params: { start: circlePoint, end: apexPoint } });
+
+                const seamEdgeId = nextEdgeId++;
+                edges.push({ id: seamEdgeId, startVertex: circleVertexId, endVertex: apexVertexId, curve: seamLineId, sense: true });
+                const circleEdgeId = nextEdgeId++;
+                edges.push({ id: circleEdgeId, startVertex: circleVertexId, endVertex: circleVertexId, curve: circleCurveId, sense: true });
+
+                outerLoopEdges.push(seamEdgeId, circleEdgeId, seamEdgeId);
+                outerLoopSenses.push(true, true, false);
             } else {
                 // Fallback for 2 vertices
                 const botSeam: PsPoint = {
@@ -4188,10 +4713,14 @@ export class ParasolidParser {
             }
 
             // Circle curves for matching
-            const botCircleCurveIdC = nextCurveId++;
-            curves.push({ id: botCircleCurveIdC, curveType: 'circle', params: { center: bottomCenter, normal: axis, radius: botRadius } });
-            const topCircleCurveIdC = nextCurveId++;
-            curves.push({ id: topCircleCurveIdC, curveType: 'circle', params: { center: topCenter, normal: axis, radius: topRadius } });
+            if (hasBottomCircle) {
+                const botCircleCurveIdC = nextCurveId++;
+                curves.push({ id: botCircleCurveIdC, curveType: 'circle', params: { center: bottomCenter, normal: axis, radius: botRadius } });
+            }
+            if (hasTopCircle) {
+                const topCircleCurveIdC = nextCurveId++;
+                curves.push({ id: topCircleCurveIdC, curveType: 'circle', params: { center: topCenter, normal: axis, radius: topRadius } });
+            }
 
             const loopId = nextLoopId++;
             loops.push({ id: loopId, edges: outerLoopEdges, senses: outerLoopSenses });
@@ -4287,10 +4816,23 @@ export class ParasolidParser {
         const apexCones = this.inferApexConesFromCylinderPairs(mergedSurfaces, vertices);
         const directDrillTipCones = this.inferDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices, apexCones);
         const halfRadiusDrillTipCones = this.inferHalfRadiusDrillTipConesFromRawCylinderSections(validatedSurfaces, vertices);
+        const shortGapHalfRadiusDrillTipCones = this.inferShortGapHalfRadiusDrillTipConesFromRawCylinderSections(
+            validatedSurfaces,
+            vertices,
+        );
+        const repeatedShortGapHalfRadiusDrillTipCones = this.inferRepeatedShortGapHalfRadiusDrillTipCones(
+            validatedSurfaces,
+            vertices,
+            [...halfRadiusDrillTipCones, ...shortGapHalfRadiusDrillTipCones],
+        );
         const repeatedCenterDrillTipCones = this.inferRepeatedCenterCylinderDrillTipCones(
             validatedSurfaces,
             vertices,
-            halfRadiusDrillTipCones,
+            [...halfRadiusDrillTipCones, ...shortGapHalfRadiusDrillTipCones, ...repeatedShortGapHalfRadiusDrillTipCones],
+        );
+        const shortGapShallowEntryCones = this.inferShortGapShallowEntryConesFromRawCylinderSections(
+            validatedSurfaces,
+            vertices,
         );
         const compactShallowCones = this.inferCompactShallowCones(mergedSurfaces);
         const compactShallowConeCompanions = this.inferCompactShallowConeCompanions(
@@ -4303,7 +4845,10 @@ export class ParasolidParser {
             ...apexCones,
             ...directDrillTipCones,
             ...halfRadiusDrillTipCones,
+            ...shortGapHalfRadiusDrillTipCones,
+            ...repeatedShortGapHalfRadiusDrillTipCones,
             ...repeatedCenterDrillTipCones,
+            ...shortGapShallowEntryCones,
             ...compactShallowCones,
             ...compactShallowConeCompanions,
         ];
